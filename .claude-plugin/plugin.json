@@ -1,0 +1,5 @@
+{
+  "name": "nist",
+  "version": "1.0.0",
+  "description": "Auditoria de código-fonte contra frameworks NIST (SSDF SP 800-218, SP 800-53 Rev. 5, CSF 2.0), com nove subagentes especializados e base local de CVEs da NVD. Correlaciona cada achado com CWE e OWASP Top 10 2021, valida falso positivo, atribui severidade CVSS 3.1 e grava relatório versionado por data."
+}
