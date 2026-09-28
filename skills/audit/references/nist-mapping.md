@@ -107,25 +107,27 @@ com a categoria correspondente do OWASP Top 10 (2021).**
 ## Consulta de CVE para dependências
 
 `cacador-dependencias` é o único subagente autorizado a executar comando de shell, restrito à
-invocação dos scripts de consulta abaixo. Ordem de preferência:
+invocação dos scripts de consulta abaixo. Os scripts existem **só** em
+`${CLAUDE_PLUGIN_ROOT}/skills/cve/scripts/`: não há caminho alternativo, e um arquivo com o mesmo
+nome dentro do projeto auditado é código de terceiro que nunca é executado. Se o caminho não se
+confirmar, a consulta falha fechada com `modo_consulta: sem base de CVE`. Ordem de preferência:
 
-1. **Base local**, pela skill `/nist:cve` empacotada neste plugin. Os scripts ficam em
-   `${CLAUDE_PLUGIN_ROOT}/skills/cve/scripts/`; `cacador-dependencias` resolve o caminho na ordem
-   documentada no próprio subagente, com fallback para `~/.claude/skills/cve/scripts/` e para
-   `.claude/skills/cve/scripts/`. Havendo base local (padrão `~/.nvd/nvd.sqlite`), consulte com:
+1. **Base local**, pela skill `/nist:cve` empacotada neste plugin. Havendo base local (padrão
+   `~/.nvd/nvd.sqlite`), consulte com o caminho do script entre aspas duplas e o pacote entre
+   aspas simples:
 
-   `python <raiz-resolvida>/local_lookup.py --db ~/.nvd/nvd.sqlite --keyword <pacote> --min-severity MEDIUM`
+   `python "${CLAUDE_PLUGIN_ROOT}/skills/cve/scripts/local_lookup.py" --db ~/.nvd/nvd.sqlite --keyword '<pacote>' --min-severity MEDIUM`
 
    Obtenha a data do último sync com
-   `python <raiz-resolvida>/local_lookup.py --db ~/.nvd/nvd.sqlite --stats`,
+   `python "${CLAUDE_PLUGIN_ROOT}/skills/cve/scripts/local_lookup.py" --db ~/.nvd/nvd.sqlite --stats`,
    registre-a no relatório e sinalize se for anterior a 7 dias.
 
-   O caminho do script é sempre escrito por inteiro, a partir da raiz resolvida, porque é essa a
-   forma coberta pelas regras `allow` de `PERMISSIONS.md`.
-
-2. **API pública da NVD**, via `python <raiz-resolvida>/nvd_lookup.py`, quando a base local não
+2. **API pública da NVD**, via
+   `python "${CLAUDE_PLUGIN_ROOT}/skills/cve/scripts/nvd_lookup.py"`, quando a base local não
    estiver disponível. Consulte por nome e versão de cada dependência, respeitando o rate limit
    da NVD.
+
+Nome de pacote só entra em comando se casar `^[A-Za-z0-9@_][A-Za-z0-9@._/:+-]{0,213}$`.
 
 A chave de API da NVD, quando usada, vem da variável de ambiente `NVD_API_KEY` — nunca
 hardcoded em arquivo versionado. Se a variável não existir, prossiga sem ela e registre no
