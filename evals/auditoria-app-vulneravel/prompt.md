@@ -10,3 +10,6 @@ allowed_tools: [Read, Glob, Grep, Agent, Skill, TodoWrite, Write]
 ---
 
 /nist:audit --relatorio security-audit/eval-relatorio.md
+
+Não vou instalar dependências: siga com essa lacuna registrada no Apêndice B. Não tenho outra
+decisão a tomar nesta auditoria; leve até o relatório final sem me perguntar nada.
