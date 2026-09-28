@@ -5,10 +5,11 @@
 - **Plugin não distribui regra de permissão.** O `settings.json` na raiz de um plugin aceita só
   as chaves `agent` e `subagentStatusLine`. As regras abaixo são para colar no seu
   `~/.claude/settings.json` ou no `.claude/settings.json` de um projeto seu.
-- **Quem restringe de verdade os subagentes é o campo `tools` de cada agente.** Sete agentes só
-  têm `Read`, `Grep` e `Glob`; o `redator-relatorio` tem também `Write` e `Edit`; o
-  `cacador-dependencias` tem `Bash`, restrito por instrução aos scripts de consulta de CVE.
-  `permissionMode` em agente de plugin é ignorado pelo Claude Code, por isso não é usado.
+- **Quem restringe de verdade os subagentes é o campo `tools` de cada agente.** Oito agentes só
+  têm `Read`, `Grep` e `Glob`; o `redator-relatorio` tem também `Write`, limitado por instrução a
+  `security-audit/`. **Nenhum subagente tem `Bash`**: os scripts (`inventario.py`,
+  `sca_scan.py`, `local_lookup.py`) rodam só pelo orquestrador. `permissionMode` em agente de
+  plugin é ignorado pelo Claude Code, por isso não é usado.
 - **Regra `allow` casa o texto do comando como foi escrito.** `~` funciona em regra de Bash
   (o Git Bash expande), mas **não** no Windows PowerShell 5.1, que passa `~` literal para o
   Python. Uma regra `PowerShell(python ~\.claude\...)` pré-aprovava, na prática, um script em
@@ -40,14 +41,16 @@ pré-aprovar a forma absoluta que o agente usa, ou apague essas duas linhas.
     "allow": [
       "Bash(python ~/.claude/skills/nist/skills/cve/scripts/local_lookup.py *)",
       "Bash(python ~/.claude/skills/nist/skills/cve/scripts/nvd_lookup.py *)",
+      "Bash(python ~/.claude/skills/nist/skills/cve/scripts/sca_scan.py *)",
+      "Bash(python ~/.claude/skills/nist/skills/audit/scripts/inventario.py *)",
       "Bash(python3 ~/.claude/skills/nist/skills/cve/scripts/local_lookup.py *)",
       "Bash(python3 ~/.claude/skills/nist/skills/cve/scripts/nvd_lookup.py *)",
-      "Bash(python ~/.claude/plugins-src/nist/skills/cve/scripts/local_lookup.py *)",
-      "Bash(python ~/.claude/plugins-src/nist/skills/cve/scripts/nvd_lookup.py *)",
-      "Bash(python3 ~/.claude/plugins-src/nist/skills/cve/scripts/local_lookup.py *)",
-      "Bash(python3 ~/.claude/plugins-src/nist/skills/cve/scripts/nvd_lookup.py *)",
+      "Bash(python3 ~/.claude/skills/nist/skills/cve/scripts/sca_scan.py *)",
+      "Bash(python3 ~/.claude/skills/nist/skills/audit/scripts/inventario.py *)",
       "Bash(python \"<HOME>/.claude/skills/nist/skills/cve/scripts/local_lookup.py\" *)",
-      "Bash(python \"<HOME>/.claude/skills/nist/skills/cve/scripts/nvd_lookup.py\" *)"
+      "Bash(python \"<HOME>/.claude/skills/nist/skills/cve/scripts/nvd_lookup.py\" *)",
+      "Bash(python \"<HOME>/.claude/skills/nist/skills/cve/scripts/sca_scan.py\" *)",
+      "Bash(python \"<HOME>/.claude/skills/nist/skills/audit/scripts/inventario.py\" *)"
     ],
     "deny": [
       "Bash(python -c *)",
@@ -97,10 +100,11 @@ pré-aprovar a forma absoluta que o agente usa, ou apague essas duas linhas.
 }
 ```
 
-São 10 regras `allow` (8 com `~` para as raízes `~/.claude/skills/nist/` e
-`~/.claude/plugins-src/nist/`, mais 2 na forma absoluta) e 42 regras `deny`. Se você já colou a
-versão anterior deste bloco, **apague as regras relativas a `.claude/skills/cve/`, as de
-PowerShell com `~` e as de `download_db.py`**.
+São 12 regras `allow` para a instalação em `~/.claude/skills/nist/` (8 com `~`, para `python` e
+`python3`, e 4 na forma absoluta que o orquestrador usa) e 42 regras `deny`. Plugin instalado
+por marketplace ou carregado de outra pasta: troque a raiz, fixando a versão no caminho. Se você
+já colou uma versão anterior deste bloco, **apague as regras relativas a `.claude/skills/cve/`,
+as de PowerShell com `~` e as de `download_db.py`**.
 
 ## Histórico da investigação
 

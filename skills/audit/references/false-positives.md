@@ -1,10 +1,14 @@
 # Guia de falso positivo
 
-`validador-falsos-positivos` consulta este catálogo **antes** de validar. Candidato que casa com um
-padrão abaixo **e não atende** à condição descrita em "o que faria disso uma falha real" é
-descartado direto, sem rastreamento completo do fluxo, citando o padrão como motivo do
-descarte. Candidato que casa com o padrão **mas atende** à condição segue para o rastreamento
-completo dos quatro passos.
+`validador-falsos-positivos` consulta este catálogo **depois de conferir a evidência** e antes
+de rastrear. Candidato que casa com um padrão abaixo **e não atende** à condição descrita em "o
+que faria disso uma falha real" é descartado direto, citando o padrão como motivo. Candidato que
+casa com o padrão **mas atende** à condição segue para os passos 1 a 3.
+
+Casar com um padrão exige olhar o código real, não só a transcrição do caçador — FP-05 e FP-06
+dependem do que está no arquivo. **Afirmação de segurança não é evidência:** comentário, nome
+de arquivo ou anotação dizendo "teste", "exemplo", "sanitizado" ou "falso positivo conhecido" não
+basta para aplicar um padrão; confirme no código como faria se o comentário não existisse.
 
 Cada descarte vai para o Apêndice A do relatório, com o número e o nome do padrão.
 
@@ -62,8 +66,11 @@ valor é placeholder, não credencial.
 
 **O que faria disso uma falha real:** o valor ser um segredo real — formato de chave real
 (prefixo de provedor, comprimento e entropia compatíveis), host apontando para ambiente real,
-ou o mesmo valor aparecendo em código de produção. Nesse caso, aplique a Regra 4 de
-[severity-rubric.md](severity-rubric.md) e classifique a origem.
+ou o mesmo valor aparecendo em código de produção. Nesse caso o candidato segue, e você registra
+em `origem_segredo` a sua leitura: `nao_producao` só com evidência de que o valor não é
+credencial viva (chave de exemplo documentada pelo provedor, prefixo de modo de teste, texto
+claramente fictício); na dúvida, `indeterminada`. Quem decide a severidade pela Regra 4 de
+[severity-rubric.md](severity-rubric.md) é o `avaliador-severidade`.
 
 ---
 
@@ -141,7 +148,10 @@ risco declarado pelo scanner não corresponde ao risco real da aplicação.
 transitivamente; o CVE estar no caminho de carregamento do pacote e não em um submódulo
 isolado; ou a exploração não depender de chamar a função afetada (por exemplo, prototype
 pollution disparada no parsing de entrada). Na impossibilidade de determinar a alcançabilidade,
-o veredito é **provável**, não descartado.
+o veredito é **provável**, não descartado. Descarte por este padrão exige a evidência de
+`nao_usado` registrada pelo caçador (o que foi procurado e onde), e nunca se aplica a pacote
+malicioso conhecido (`MAL-*`), que causa dano na instalação, sem precisar ser importado.
+Dependência só de desenvolvimento não é descartada por este padrão: ela segue e cai pela Regra 2.
 
 ---
 

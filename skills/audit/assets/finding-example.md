@@ -11,7 +11,7 @@ detalhe, seguindo o gabarito de catorze campos de
 - **Severidade:** Crítica
 - **Estado:** novo
 - **Controle NIST:** SP 800-218 PW.5 (codificação segura); SP 800-53 SI-10 (validação de entrada)
-- **CWE / OWASP:** CWE-89; OWASP A03:2021 – Injection
+- **CWE / OWASP:** CWE-89; OWASP A05:2025 – Injection
 - **Veredito:** Confirmado
 
 **O que é:** O parâmetro de busca `q` é concatenado diretamente numa query SQL sem

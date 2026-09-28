@@ -1,18 +1,37 @@
 ---
 name: cve
-description: Consulta de CVEs na base da NVD, local ou pela API pública. Mantém um espelho SQLite em ~/.nvd/nvd.sqlite com retomada por checkpoint, e consulta por identificador de CVE, por termo ou por vendor:product de CPE, com filtro de severidade mínima. Use quando precisar verificar se uma dependência tem CVE conhecido, consultar um CVE específico, ou checar o estado e a data de sincronização da base local de vulnerabilidades.
+description: Vulnerabilidades conhecidas em dependências e consulta de CVEs. Varre os lockfiles de um projeto e casa pacote e versão exata no OSV, com nota, CWE e KEV da NVD (sca_scan.py); mantém um espelho SQLite da NVD em ~/.nvd/nvd.sqlite com retomada por checkpoint; e consulta por identificador de CVE, por termo ou por vendor:product de CPE, com filtro de severidade mínima. Use quando precisar saber se as dependências de um projeto têm vulnerabilidade conhecida, consultar um CVE específico, ou checar o estado e a data de sincronização da base local.
 allowed-tools:
   - Read
   - Glob
   - Grep
+  - Bash(python "${CLAUDE_SKILL_DIR}/scripts/sca_scan.py" *)
   - Bash(python "${CLAUDE_SKILL_DIR}/scripts/local_lookup.py" *)
   - Bash(python "${CLAUDE_SKILL_DIR}/scripts/nvd_lookup.py" *)
 ---
 
-# Consulta de CVEs da NVD
+# Vulnerabilidades em dependências e consulta de CVEs
 
-Três scripts em `${CLAUDE_SKILL_DIR}/scripts/`, todos em Python 3 e sem dependência externa —
-só a biblioteca padrão.
+Quatro scripts em `${CLAUDE_SKILL_DIR}/scripts/`, todos em Python 3 e sem dependência externa —
+só a biblioteca padrão (`sca_scan.py` pede Python 3.11 ou superior).
+
+## Dependências de um projeto
+
+```bash
+python "${CLAUDE_SKILL_DIR}/scripts/sca_scan.py" --raiz "<projeto>" --saida "<projeto>/security-audit/.trabalho/sca.json" --db ~/.nvd/nvd.sqlite
+```
+
+Lê `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock` (v1 e Berry), `pnpm-lock.yaml`
+(leitura simplificada), `requirements*.txt`, `Pipfile.lock`, `poetry.lock`, `uv.lock`, `go.mod`,
+`Cargo.lock`, `composer.lock`, `Gemfile.lock`, `packages.lock.json` e `gradle.lockfile`, e
+consulta o **OSV** por nome e versão exata. Grava um JSON com o inventário, os pacotes
+vulneráveis (IDs, CVEs, nota, CWE, KEV, versões corrigidas, cadeia até o pacote direto), os
+pacotes maliciosos conhecidos (`MAL-*`), os manifestos sem lockfile, as faixas sem pin e as
+fontes fora do registro público.
+
+**Privacidade:** nome e versão de cada pacote público vão para api.osv.dev. Pacote npm resolvido
+fora do registro público não é enviado; `--nao-enviar <regex>` exclui outros nomes; `--offline`
+não faz rede nenhuma e produz só o inventário. Mostre isso ao usuário antes de rodar.
 
 **Rode os scripts sempre pelo caminho completo, entre aspas, exatamente como nos exemplos.**
 Nunca use `scripts/...` relativo: ele aponta para a pasta `scripts/` do projeto aberto, que é

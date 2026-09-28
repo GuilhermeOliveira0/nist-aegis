@@ -1,0 +1,15 @@
+{
+  "name": "nist-aegis",
+  "owner": {
+    "name": "GuilhermeOliveira0",
+    "url": "https://github.com/GuilhermeOliveira0"
+  },
+  "description": "Auditoria de segurança de código guiada por NIST para Claude Code.",
+  "plugins": [
+    {
+      "name": "nist",
+      "source": "./",
+      "description": "Auditoria de código-fonte guiada por NIST com nove subagentes, inventário determinístico e consulta de vulnerabilidades por pacote e versão."
+    }
+  ]
+}
