@@ -36,13 +36,16 @@ propôs. O relatório propõe; o humano decide.
 - `descartados`, do `validador-falsos-positivos`;
 - o mapa do `mapeador-projeto`;
 - o caminho do relatório anterior mais recente, ou a informação de que não existe;
-- o critério de escopo aplicado.
+- o critério de escopo aplicado;
+- as `tentativas_injecao` consolidadas;
+- o caminho pedido pelo usuário com `--relatorio`, se houver.
 
 ## Passo 1 — Caminho do arquivo
 
-`security-audit/nist-audit-YYYY-MM-DD.md`, com a data corrente da sessão. Antes de gravar,
-verifique se o caminho já existe. Se existir, anexe sufixo incremental — `-2`, `-3` — até obter
-um caminho livre. **Nunca sobrescreva arquivo existente.**
+`security-audit/nist-audit-YYYY-MM-DD.md`, com a data corrente da sessão, ou o caminho pedido
+com `--relatorio` quando a skill o repassar. Antes de gravar, verifique se o caminho já existe.
+Se existir, anexe sufixo incremental — `-2`, `-3` — até obter um caminho livre. **Nunca
+sobrescreva arquivo existente.**
 
 ## Passo 2 — Comparação com a execução anterior
 

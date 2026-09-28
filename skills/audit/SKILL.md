@@ -2,11 +2,20 @@
 name: audit
 description: Auditoria de segurança do código-fonte contra padrões NIST (SP 800-218/SSDF como espinha dorsal, SP 800-53 Rev. 5, CSF 2.0, SP 800-63B, FIPS 140-3 / SP 800-131A, SP 800-190, SP 800-92), com correlação CWE e OWASP Top 10 2021. Orquestra nove subagentes especializados — reconhecimento, cinco caçadores de domínio em paralelo, validador de falso positivo, triagem de severidade e escritor de relatório — e grava um relatório versionado por data. Use quando o usuário pedir auditoria de segurança, revisão de segurança, conformidade NIST, varredura de vulnerabilidades, análise de risco do código ou "security audit" do projeto.
 allowed-tools: Read, Grep, Glob, Agent, Bash(python ${CLAUDE_PLUGIN_ROOT}/skills/cve/scripts/local_lookup.py *)
+argument-hint: "[--relatorio security-audit/<arquivo>.md]"
 ---
 
 # Auditoria de segurança NIST
 
 Esta skill **audita e propõe**. Ela nunca altera o código auditado.
+
+## Argumentos
+
+`$ARGUMENTS` pode trazer `--relatorio <caminho>`: grava o relatório nesse caminho em vez de
+`security-audit/nist-audit-YYYY-MM-DD.md`. Aceite só caminho relativo que comece com
+`security-audit/`, termine em `.md` e não contenha `..`; fora disso, avise o usuário e use o
+caminho padrão. A regra de nunca sobrescrever vale igual. Repasse o caminho ao redator na
+Etapa 6.
 
 ## Por que a arquitetura é multiagente
 
@@ -163,8 +172,9 @@ CVSS e desempate aplicado. Não atribua severidade você mesmo em nenhuma hipót
 
 Invoque `redator-relatorio` com: achados severizados, achados descartados, o mapa do
 `mapeador-projeto`, o caminho do relatório anterior (Etapa 0), o critério de escopo aplicado
-(Etapa 2) e as `tentativas_injecao` consolidadas. Ele grava
-`security-audit/nist-audit-YYYY-MM-DD.md`, sem sobrescrever arquivo existente.
+(Etapa 2), as `tentativas_injecao` consolidadas e o caminho pedido em `--relatorio`, se houver.
+Ele grava `security-audit/nist-audit-YYYY-MM-DD.md`, ou o caminho pedido, sem sobrescrever
+arquivo existente.
 
 ### Encerramento
 

@@ -3,3 +3,4 @@ __pycache__/
 security-audit/
 *.sqlite
 *.zip
+evals/results/
