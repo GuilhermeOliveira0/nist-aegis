@@ -113,9 +113,17 @@ def _json_curto(valor):
     return json.dumps(valor, ensure_ascii=False, separators=(",", ":")) if valor else None
 
 
+def mesmo_ecossistema(declarado, ecossistema):
+    """`Packagist:https://packages.drupal.org/8` é Packagist com repositório próprio: o OSV
+    anota assim os avisos de módulo do Drupal, e o composer.lock traz o pacote só como
+    `drupal/<módulo>`."""
+    return isinstance(declarado, str) and declarado.split(":", 1)[0] == ecossistema
+
+
 def importar_registro(conn, registro, ecossistema):
     """Grava um registro OSV. Só as entradas `affected` do ecossistema do arquivo de origem
-    entram, para que o mesmo aviso publicado em dois ecossistemas não se duplique."""
+    entram, para que o mesmo aviso publicado em dois ecossistemas não se duplique. Devolve
+    True quando o registro tem ao menos uma entrada do ecossistema."""
     if not isinstance(registro, dict) or not isinstance(registro.get("id"), str):
         return False
     vid = registro["id"]
@@ -132,15 +140,17 @@ def importar_registro(conn, registro, ecossistema):
          detalhes[:DETALHES_MAX] if isinstance(detalhes, str) else None,
          _json_curto(registro.get("aliases")), _json_curto(registro.get("severity")), _json_curto(db_spec)))
     conn.execute("DELETE FROM affected WHERE vuln_id = ? AND ecosystem = ?", (vid, ecossistema))
+    gravou = False
     for aff in registro.get("affected") or []:
         pkg = (aff or {}).get("package") or {}
-        if pkg.get("ecosystem") != ecossistema or not isinstance(pkg.get("name"), str):
+        if not mesmo_ecossistema(pkg.get("ecosystem"), ecossistema) or not isinstance(pkg.get("name"), str):
             continue
         conn.execute(
             "INSERT INTO affected (vuln_id, ecosystem, name_key, name, ranges, versions) VALUES (?, ?, ?, ?, ?, ?)",
             (vid, ecossistema, name_key(ecossistema, pkg["name"]), pkg["name"],
              _json_curto(aff.get("ranges")), _json_curto(aff.get("versions"))))
-    return True
+        gravou = True
+    return gravou
 
 
 def importar_zip(conn, ecossistema, caminho_zip):

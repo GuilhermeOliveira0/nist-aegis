@@ -127,6 +127,17 @@ class TestImportacaoEConsulta(BaseTemporaria):
         self.assertEqual(self.consultar("PyPI", "lib", "1.0")[0], ["GHSA-m"])
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM affected").fetchone()[0], 2)
 
+    def test_packagist_com_repositorio_proprio_do_drupal(self):
+        drupal = registro("DRUPAL-CONTRIB-2017-082", "Packagist", "drupal/permissions_by_term",
+                          [("introduced", "0"), ("fixed", "1.20.0")])
+        drupal["affected"][0]["package"]["ecosystem"] = "Packagist:https://packages.drupal.org/8"
+        so_npm = registro("GHSA-so-npm", "npm", "mediaelement", [("introduced", "0")])
+        total = self.importar("Packagist", [drupal, so_npm])
+        self.assertEqual(total, 1)  # o registro só de npm não conta como Packagist
+        self.assertEqual(self.consultar("Packagist", "drupal/permissions_by_term", "1.19.0")[0],
+                         ["DRUPAL-CONTRIB-2017-082"])
+        self.assertEqual(self.consultar("Packagist", "drupal/permissions_by_term", "1.20.0")[0], [])
+
     def test_reimportacao_troca_o_conteudo_e_limpa_orfaos(self):
         self.importar("npm", [GHSA_QS, MAL_LODASH])
         self.importar("npm", [MAL_LODASH])

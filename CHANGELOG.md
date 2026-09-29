@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.1 — 2026-09-29
+
+- Base OSV local: aviso com ecossistema `Packagist:<repositório>` entra como Packagist. O OSV
+  anota assim os avisos de módulo do Drupal (`Packagist:https://packages.drupal.org/8`, 610
+  registros), que ficavam fora da base.
+- A contagem de registros por ecossistema é a mesma no download completo e no `--update`: só
+  conta registro com entrada daquele ecossistema.
+
 ## 1.2.0 — 2026-09-29
 
 ### Base OSV local: nada sai da máquina
