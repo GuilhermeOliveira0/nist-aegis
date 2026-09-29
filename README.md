@@ -59,6 +59,27 @@ claude --plugin-dir ./nist-aegis
 copie a pasta para `~/.claude/skills/nist`. Depois de alterar qualquer arquivo do plugin, rode
 `/reload-plugins`.
 
+## Primeiros passos
+
+1. **Instale o plugin** (seção anterior) e confira que tem Python 3.11 ou superior.
+2. **Baixe a base OSV uma vez** (cerca de 300 MB). Sem ela, a auditoria roda, mas sem consulta de
+   vulnerabilidade em dependência:
+
+   ```bash
+   python <pasta-do-plugin>/skills/cve/scripts/download_osv.py
+   ```
+
+   `<pasta-do-plugin>` é onde o plugin ficou: `~/.claude/skills/nist` na cópia manual, ou
+   `~/.claude/plugins/cache/nist-aegis/nist/<versão>` pelo marketplace. A base da NVD é opcional
+   (seção [Bases locais](#bases-locais)).
+3. **Abra o Claude Code na pasta do projeto que vai auditar.** A auditoria usa a pasta de
+   trabalho da sessão como raiz.
+4. **Rode `/nist:audit`.** Na primeira vez o Claude Code pede permissão para os scripts do plugin
+   (`inventario.py`, `sca_scan.py`, `local_lookup.py`); aprove.
+5. **Leia o relatório** em `security-audit/nist-audit-AAAA-MM-DD.md`.
+6. **De tempos em tempos**, atualize a base: `download_osv.py --update` baixa só o que mudou. O
+   relatório avisa quando a base passa de 7 dias.
+
 ## Uso
 
 ```
@@ -73,7 +94,39 @@ copie a pasta para `~/.claude/skills/nist`. Depois de alterar qualquer arquivo d
 Por padrão a consulta de vulnerabilidades roda na base OSV local. `--online` consulta a API do
 OSV; `--offline` não consulta nada e entrega só o inventário de dependências.
 
-A auditoria dispara pelo menos nove subagentes: em projeto grande pode levar dezenas de minutos.
+Acima de 500 arquivos elegíveis a auditoria para e pergunta: varrer tudo, só um subdiretório ou
+só o diff contra uma branch base.
+
+## O que você recebe
+
+Dois arquivos novos em `security-audit/` do projeto auditado — nunca sobrescreve um existente;
+no mesmo dia, ganha sufixo `-2`, `-3`:
+
+- **`nist-audit-AAAA-MM-DD.md`**, o relatório:
+  1. sumário executivo, com a contagem por severidade, os riscos de maior impacto e o comparativo
+     com a execução anterior;
+  2. painel de conformidade por publicação NIST (desvio, sem desvio no escopo, não avaliado, não
+     aplicável — nunca "conforme");
+  3. achados por severidade, cada um com arquivo, linha, trecho, caminho de exploração, controle
+     NIST, CWE, OWASP e correção;
+  4. plano de remediação priorizado;
+  5. Apêndice A com os candidatos descartados como falso positivo e o motivo; Apêndice B com o
+     que a varredura não cobriu.
+- **`nist-audit-AAAA-MM-DD.json`**, com os mesmos achados, usado para comparar a próxima execução.
+
+Na conversa aparece só um resumo: os caminhos, a contagem, os críticos em uma linha, o que não
+foi verificado e as tentativas de injeção de prompt encontradas. Segredo sai sempre mascarado.
+
+## Modelo, esforço e custo
+
+Os subagentes herdam o modelo da sessão. Use o modelo mais capaz disponível: auditoria é onde um
+modelo menor deixa passar falha ou gera falso positivo. `validador-falsos-positivos` e
+`avaliador-severidade` rodam sempre com esforço alto; os demais seguem o esforço da sessão —
+alto no uso comum, máximo em projeto crítico.
+
+A auditoria dispara pelo menos nove subagentes. Referência: o projeto de teste do eval, com 7
+arquivos, consumiu cerca de 720 mil tokens somando os subagentes e levou uns 40 minutos. Em
+projeto grande, `--diff <branch>` ou um subdiretório reduzem o custo.
 
 ## Privacidade
 
@@ -176,6 +229,8 @@ o inventário não sabe o que está versionado.
 python tests/test_cve_scripts.py
 python tests/test_sca_scan.py
 python tests/test_inventario.py
+python tests/test_osv_versions.py
+python tests/test_osv_local.py
 claude plugin eval . --scaffold --runs 1 --ablation none --allow-tools Write --no-publish
 ```
 
