@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(RAIZ, "skills", "audit", "scripts"))
@@ -138,6 +139,106 @@ class TestInventario(Projeto):
         # a própria pasta do relatório não entra no inventário
         r = inventario.inventory(self.raiz)
         self.assertFalse(any(a.startswith("security-audit/") for a in r["elegiveis"]))
+
+
+def criar_link(alvo, link):
+    try:
+        os.symlink(alvo, link)
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
+class TestEndurecimento(Projeto):
+    @unittest.skipUnless(TEM_GIT, "git não instalado")
+    def test_git_nao_faz_fetch_preguicoso_de_partial_clone(self):
+        """Partial clone com objeto ausente: o git buscaria o objeto pelo remote e rodaria o
+        core.sshCommand do repositório. O inventário não pode disparar isso."""
+        self.git("init", "-q", "-b", "main")
+        self.git("add", "src/app.js")
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "a")
+        self.git("checkout", "-q", "-b", "feature")
+        self.git("add", "package.json")
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "b")
+        arvore = subprocess.run(["git", "rev-parse", "main^{tree}"], cwd=self.raiz, check=True,
+                                stdout=subprocess.PIPE).stdout.decode().strip()
+        objeto = os.path.join(self.raiz, ".git", "objects", arvore[:2], arvore[2:])
+        os.chmod(objeto, 0o644)  # o git grava objeto como somente leitura
+        os.remove(objeto)
+        marcador = os.path.join(self.raiz, "EXECUTOU")
+        python = sys.executable.replace("\\", "/")
+        comando = '"%s" -c "open(r\'%s\', \'w\').close()"' % (python, marcador.replace("\\", "/"))
+        for chave, valor in (("core.repositoryformatversion", "1"), ("extensions.partialClone", "origin"),
+                             ("remote.origin.url", "ssh://example.invalid/x"), ("remote.origin.promisor", "true"),
+                             ("core.sshCommand", comando)):
+            self.git("config", chave, valor)
+        # controle: sem as proteções, o ataque funciona neste ambiente
+        subprocess.run(["git", "diff", "--name-only", "main...HEAD"], cwd=self.raiz,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        if not os.path.exists(marcador):
+            self.skipTest("o git deste ambiente não fez o fetch preguiçoso nem sem proteção")
+        os.remove(marcador)
+        r = inventario.inventory(self.raiz, diff_base="main")
+        self.assertFalse(os.path.exists(marcador), "o inventário executou o core.sshCommand do repositório")
+        self.assertIsNotNone(r["git"]["erro"])  # o diff falha sem o objeto, e isso fica registrado
+
+    @unittest.skipUnless(TEM_GIT, "git não instalado")
+    def test_git_plantado_na_raiz_nao_e_usado(self):
+        nome = "git.exe" if os.name == "nt" else "git"
+        falso = escrever(self.raiz, nome, "#!/bin/sh\nexit 0\n")
+        os.chmod(falso, 0o755)
+        caminho = os.pathsep.join([self.raiz, ".", os.environ.get("PATH", "")])
+        with mock.patch.dict(os.environ, {"PATH": caminho}):
+            escolhido = inventario.git_executable(self.raiz)
+        self.assertFalse(inventario._inside(escolhido, self.raiz), escolhido)
+        self.assertTrue(os.path.isabs(escolhido))
+
+    def test_subdiretorio_com_prefixo_igual_ao_da_raiz_e_recusado(self):
+        vizinho = self.raiz + "2"
+        os.makedirs(vizinho)
+        try:
+            with self.assertRaises(ValueError):
+                inventario.inventory(self.raiz, subdir="../" + os.path.basename(vizinho))
+        finally:
+            shutil.rmtree(vizinho, ignore_errors=True)
+
+    def test_link_simbolico_nao_e_seguido(self):
+        fora = tempfile.mkdtemp(prefix="nist-fora-")
+        self.addCleanup(shutil.rmtree, fora, True)
+        alvo = escrever(fora, "credentials", "aws_secret_access_key = '" + "Qm9" + "vZ3pWx7Lk2Rt8Yp4" + "'\n")
+        if not criar_link(alvo, os.path.join(self.raiz, "src", "link.py")):
+            self.skipTest("este ambiente não permite criar link simbólico")
+        r = inventario.inventory(self.raiz)
+        self.assertIn("src/link.py", r["links_simbolicos"])
+        self.assertNotIn("src/link.py", r["elegiveis"])
+        self.assertFalse([h for h in r["segredos_candidatos"] if h["arquivo"] == "src/link.py"])
+
+
+class TestSegredosSemAspas(Projeto):
+    def test_config_sem_aspas_e_detectado_e_mascarado(self):
+        valor_env = "Hx7" + "pQ2vLm9Tz4"
+        valor_yaml = "Rw5" + "nB8kJc3Ys6"
+        escrever(self.raiz, ".env.production", "DB_PASSWORD=%s\nTOKEN_TTL=3600000\nAPI_KEY=${API_KEY}\n" % valor_env)
+        escrever(self.raiz, "config/app.yaml", "db:\n  password: %s  # produção\n  token_ttl: 3600\n"
+                 "  secret: $VAULT_SECRET\n  api_key: ENC[AES256_GCM,data:abc]\n" % valor_yaml)
+        escrever(self.raiz, "src/servico.py", "password = obter_senha_do_cofre()\n")
+        r = inventario.inventory(self.raiz)
+        texto = json.dumps(r["segredos_candidatos"], ensure_ascii=False)
+        self.assertNotIn(valor_env, texto)
+        self.assertNotIn(valor_yaml, texto)
+        achados = {(h["arquivo"], h["linha"], h["tipo"]) for h in r["segredos_candidatos"]}
+        self.assertIn((".env.production", 1, "valor atribuído a 'db_password'"), achados)
+        self.assertIn(("config/app.yaml", 2, "valor atribuído a 'password'"), achados)
+        arquivos_linhas = {(a, l) for a, l, _ in achados}
+        for falso_positivo in ((".env.production", 2), (".env.production", 3), ("config/app.yaml", 3),
+                               ("config/app.yaml", 4), ("config/app.yaml", 5), ("src/servico.py", 1)):
+            self.assertNotIn(falso_positivo, arquivos_linhas)
+
+    def test_linha_informada_ignora_quebras_que_nao_sao_newline(self):
+        escrever(self.raiz, "src/x.py", "a = 1\x0cb = 2 c = 3\npassword = '" + "Tq4" + "mW9xZp2Lr7" + "'\n")
+        r = inventario.inventory(self.raiz)
+        linha = [h["linha"] for h in r["segredos_candidatos"] if h["arquivo"] == "src/x.py"]
+        self.assertEqual(linha, [2])
 
 
 if __name__ == "__main__":

@@ -2,10 +2,10 @@
 """Consulta a base local de CVEs da NVD.
 
 Uso:
-    python local_lookup.py --db ~/.nvd/nvd.sqlite --stats
-    python local_lookup.py --db ~/.nvd/nvd.sqlite --cve CVE-2021-44228
-    python local_lookup.py --db ~/.nvd/nvd.sqlite --keyword lodash --min-severity HIGH --limit 3
-    python local_lookup.py --db ~/.nvd/nvd.sqlite --product microsoft:windows --min-severity CRITICAL --limit 3
+    python local_lookup.py --stats
+    python local_lookup.py --cve CVE-2021-44228
+    python local_lookup.py --keyword lodash --min-severity HIGH --limit 3
+    python local_lookup.py --product microsoft:windows --min-severity CRITICAL --limit 3
 
 Não faz rede, não lê NVD_API_KEY e abre a base só para leitura.
 
@@ -20,6 +20,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bases  # noqa: E402
 import nvd_common as nc  # noqa: E402
 
 SYNC_STALE_DAYS = 7
@@ -40,7 +41,8 @@ class UsageError(Exception):
 
 def build_parser():
     parser = argparse.ArgumentParser(description="Consulta a base local de CVEs da NVD.")
-    parser.add_argument("--db", required=True, help="caminho do arquivo SQLite")
+    parser.add_argument("--db", help="caminho do arquivo SQLite (padrão: ~/.nist-aegis/bases/nvd.sqlite, "
+                        "ou ~/.nvd/nvd.sqlite de versões anteriores, quando existir)")
     parser.add_argument("--stats", action="store_true", help="estado da base")
     parser.add_argument("--cve", help="consulta um CVE por identificador")
     parser.add_argument(
@@ -263,6 +265,7 @@ def main(argv=None):
     nc.configure_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
+    args.db = bases.resolve_nvd(args.db)
     try:
         conn = nc.connect(args.db, create=False, readonly=True)
     except FileNotFoundError as exc:

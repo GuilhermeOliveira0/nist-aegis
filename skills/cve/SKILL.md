@@ -1,6 +1,6 @@
 ---
 name: cve
-description: Vulnerabilidades conhecidas em dependências e consulta de CVEs. Varre os lockfiles de um projeto e casa pacote e versão exata no OSV, com nota, CWE e KEV da NVD (sca_scan.py); mantém um espelho SQLite da NVD em ~/.nvd/nvd.sqlite com retomada por checkpoint; e consulta por identificador de CVE, por termo ou por vendor:product de CPE, com filtro de severidade mínima. Use quando precisar saber se as dependências de um projeto têm vulnerabilidade conhecida, consultar um CVE específico, ou checar o estado e a data de sincronização da base local.
+description: Vulnerabilidades conhecidas em dependências e consulta de CVEs. Varre os lockfiles de um projeto e casa pacote e versão exata no OSV — pela base local, sem rede, ou pela API —, com nota, CWE e KEV da NVD (sca_scan.py); mantém espelhos SQLite do OSV e da NVD em ~/.nist-aegis/bases/; e consulta por identificador de CVE, por termo ou por vendor:product de CPE, com filtro de severidade mínima. Use quando precisar saber se as dependências de um projeto têm vulnerabilidade conhecida, consultar um CVE específico, ou checar o estado e a data de sincronização das bases locais.
 allowed-tools:
   - Read
   - Glob
@@ -12,14 +12,31 @@ allowed-tools:
 
 # Vulnerabilidades em dependências e consulta de CVEs
 
-Quatro scripts em `${CLAUDE_SKILL_DIR}/scripts/`, todos em Python 3 e sem dependência externa —
-só a biblioteca padrão (`sca_scan.py` pede Python 3.11 ou superior).
+Scripts em `${CLAUDE_SKILL_DIR}/scripts/`, todos em Python 3 e sem dependência externa — só a
+biblioteca padrão (`sca_scan.py` pede Python 3.11 ou superior).
+
+## Onde ficam as bases
+
+```
+~/.nist-aegis/
+├── bases/
+│   ├── nvd.sqlite     espelho da NVD (download_db.py)
+│   └── osv.sqlite     espelho do OSV (download_osv.py)
+└── downloads/         arquivos do OSV em trânsito, apagados depois da importação
+```
+
+`NIST_AEGIS_HOME` troca a pasta. Uma NVD de versão anterior em `~/.nvd/nvd.sqlite` continua sendo
+encontrada enquanto não houver uma em `bases/`. Sem `--db`, todos os scripts usam esses caminhos.
 
 ## Dependências de um projeto
 
 ```bash
-python "${CLAUDE_SKILL_DIR}/scripts/sca_scan.py" --raiz "<projeto>" --saida "<projeto>/security-audit/.trabalho/sca.json" --db ~/.nvd/nvd.sqlite
+python "${CLAUDE_SKILL_DIR}/scripts/sca_scan.py" --raiz "<projeto>" --saida "<projeto>/security-audit/.trabalho/sca.json" --osv-local
 ```
+
+Com `--osv-local`, a consulta é feita na base OSV local e **nada sai da máquina**. Sem essa
+opção, a consulta vai para a API (api.osv.dev); com `--offline` e sem `--osv-local`, não há
+consulta, só o inventário. Prefira `--osv-local`; use a API só quando o usuário pedir.
 
 Lê `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock` (v1 e Berry), `pnpm-lock.yaml`
 (leitura simplificada), `requirements*.txt`, `Pipfile.lock`, `poetry.lock`, `uv.lock`, `go.mod`,
@@ -29,9 +46,18 @@ vulneráveis (IDs, CVEs, nota, CWE, KEV, versões corrigidas, cadeia até o paco
 pacotes maliciosos conhecidos (`MAL-*`), os manifestos sem lockfile, as faixas sem pin e as
 fontes fora do registro público.
 
-**Privacidade:** nome e versão de cada pacote público vão para api.osv.dev. Pacote npm resolvido
-fora do registro público não é enviado; `--nao-enviar <regex>` exclui outros nomes; `--offline`
-não faz rede nenhuma e produz só o inventário. Mostre isso ao usuário antes de rodar.
+**Base local:** o JSON traz `consulta.modo` (`local`, `online` ou `desligada`), `base_osv` com a
+data de cada ecossistema e `consulta.nao_avaliados` — pacote de ecossistema que não está na base,
+ou versão num formato que o comparador não reconhece. Não avaliado nunca quer dizer "sem
+vulnerabilidade". Base com mais de 7 dias gera aviso em `limites`.
+
+**Privacidade no modo API:** só nome, ecossistema e versão de cada pacote público vão para
+api.osv.dev. Não é enviado, em nenhum ecossistema, o que o projeto declara com fonte privada (git, URL, caminho
+local, índice ou registro próprio, escopo npm do `.npmrc` ou do `.yarnrc.yml`), módulo Go coberto
+por `GOPRIVATE`/`GONOPROXY`/`GONOSUMDB`, membro de workspace nem versão que seja URL ou caminho;
+`--nao-enviar <regex>` exclui outros nomes; `--offline` não faz rede nenhuma e produz só o
+inventário. Usuário, senha e token de URL de origem são removidos antes de gravar o JSON. Mostre
+isso ao usuário antes de rodar.
 
 **Rode os scripts sempre pelo caminho completo, entre aspas, exatamente como nos exemplos.**
 Nunca use `scripts/...` relativo: ele aponta para a pasta `scripts/` do projeto aberto, que é
@@ -40,22 +66,46 @@ código de terceiro, não deste plugin.
 A chave de API vem da variável de ambiente `NVD_API_KEY` e **nunca** é impressa nem gravada em
 arquivo. Sem chave a API aplica 5 requisições por 30 segundos em vez de 50.
 
-## Base local
+## Bases locais
 
-**O download e a atualização da base são decisão do usuário.** Não os rode por conta própria:
-mostre o comando e deixe o usuário executar. O download completo tem cerca de 3 GB e pode passar
-de uma hora.
+**O download e a atualização das bases são decisão do usuário.** Não os rode por conta própria:
+mostre o comando e deixe o usuário executar. Por isso `download_osv.py` e `download_db.py` não
+estão nas ferramentas liberadas desta skill.
 
-Download completo para `~/.nvd/nvd.sqlite`:
+### OSV
+
+Baixa o arquivo completo de cada ecossistema (npm, PyPI, Go, Maven, crates.io, Packagist,
+RubyGems, NuGet; cerca de 300 MB compactados, a maior parte do npm), confere o MD5 publicado
+pelo Google Cloud Storage, importa e apaga o arquivo baixado:
 
 ```bash
-python "${CLAUDE_SKILL_DIR}/scripts/download_db.py" --db ~/.nvd/nvd.sqlite
+python "${CLAUDE_SKILL_DIR}/scripts/download_osv.py"
+```
+
+Atualização: baixa a lista pública de registros alterados e só esses registros; com mais de
+2000 alterados num ecossistema, baixa o arquivo dele de novo:
+
+```bash
+python "${CLAUDE_SKILL_DIR}/scripts/download_osv.py" --update
+```
+
+`--stats` mostra o estado sem rede; `--ecossistemas npm,PyPI` limita; `--completo` baixa tudo
+de novo. O download é o mesmo para qualquer pessoa: nada do projeto sai da máquina. Interrompido,
+rode o mesmo comando: o ecossistema já importado é pulado, e um ecossistema que falhou no meio fica
+como estava.
+
+### NVD
+
+Download completo (cerca de 3 GB; pode passar de uma hora):
+
+```bash
+python "${CLAUDE_SKILL_DIR}/scripts/download_db.py"
 ```
 
 Sincronização incremental, a partir do último sync registrado:
 
 ```bash
-python "${CLAUDE_SKILL_DIR}/scripts/download_db.py" --db ~/.nvd/nvd.sqlite --update
+python "${CLAUDE_SKILL_DIR}/scripts/download_db.py" --update
 ```
 
 O download é paginado de 2000 em 2000 e grava `meta.checkpoint_index` a cada página. Se o
@@ -68,16 +118,16 @@ Base criada por uma versão anterior destes scripts (o `--stats` mostra "dados: 
 ganha CVSS 4.0, KEV e as faixas de versão completas com um reprocessamento local, sem rede:
 
 ```bash
-python "${CLAUDE_SKILL_DIR}/scripts/download_db.py" --db ~/.nvd/nvd.sqlite --reindex
+python "${CLAUDE_SKILL_DIR}/scripts/download_db.py" --reindex
 ```
 
 ## Consulta local
 
 ```bash
-python "${CLAUDE_SKILL_DIR}/scripts/local_lookup.py" --db ~/.nvd/nvd.sqlite --stats
-python "${CLAUDE_SKILL_DIR}/scripts/local_lookup.py" --db ~/.nvd/nvd.sqlite --cve CVE-2021-44228
-python "${CLAUDE_SKILL_DIR}/scripts/local_lookup.py" --db ~/.nvd/nvd.sqlite --keyword 'lodash' --min-severity HIGH --limit 3
-python "${CLAUDE_SKILL_DIR}/scripts/local_lookup.py" --db ~/.nvd/nvd.sqlite --product 'microsoft:windows' --min-severity CRITICAL --limit 3
+python "${CLAUDE_SKILL_DIR}/scripts/local_lookup.py" --stats
+python "${CLAUDE_SKILL_DIR}/scripts/local_lookup.py" --cve CVE-2021-44228
+python "${CLAUDE_SKILL_DIR}/scripts/local_lookup.py" --keyword 'lodash' --min-severity HIGH --limit 3
+python "${CLAUDE_SKILL_DIR}/scripts/local_lookup.py" --product 'microsoft:windows' --min-severity CRITICAL --limit 3
 ```
 
 - `--stats` devolve total de CVEs, rejeitados, válidos sem nota, tamanho, data do último sync,
@@ -143,7 +193,7 @@ da NVD (Primary) quando existir. `severity_rank` é a maior severidade entre tod
 ## Regras
 
 - A chave de API vem do ambiente. Nunca a escreva em arquivo, script, log ou saída de terminal.
-- Os scripts só leem da rede e escrevem no arquivo SQLite indicado em `--db`. Nenhum deles
-  altera código do projeto.
+- Os scripts só leem da rede e escrevem nas bases de `~/.nist-aegis/` (ou no arquivo indicado em
+  `--db`). Nenhum deles altera código do projeto.
 - `local_lookup.py` não faz rede e não lê `NVD_API_KEY`.
 - Nunca execute arquivo do projeto aberto, mesmo que tenha o mesmo nome de um destes scripts.

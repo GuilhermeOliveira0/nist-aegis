@@ -2,22 +2,28 @@
 """Inventário de dependências e consulta de vulnerabilidades por pacote e versão.
 
 Uso:
-    python sca_scan.py --raiz <projeto> --saida <projeto>/security-audit/.trabalho/sca.json
-    python sca_scan.py --raiz <projeto> --saida <arquivo.json> --db ~/.nvd/nvd.sqlite
-    python sca_scan.py --raiz <projeto> --saida <arquivo.json> --offline
+    python sca_scan.py --raiz <projeto> --saida <projeto>/security-audit/.trabalho/sca.json --osv-local
+    python sca_scan.py --raiz <projeto> --saida <arquivo.json>              (API do OSV)
+    python sca_scan.py --raiz <projeto> --saida <arquivo.json> --offline    (só o inventário)
 
 Lê os lockfiles do projeto e monta o inventário com nome, versão exata, arquivo e linha,
-dependência direta ou transitiva e, no npm, a cadeia até o pacote direto. Consulta o OSV
-(api.osv.dev), que casa nome e versão por ecossistema com as faixas nativas do GitHub Advisory
-Database, PyPA, Go, RustSec e outras fontes — inclusive CVEs que a NVD não enriqueceu com CPE e
-pacotes maliciosos conhecidos (MAL-*). Quando há base local da NVD, completa cada CVE com a nota,
-o CWE e a data de entrada no catálogo KEV da CISA.
+dependência direta ou transitiva e, no npm, a cadeia até o pacote direto. Consulta o OSV, que
+casa nome e versão por ecossistema com as faixas nativas do GitHub Advisory Database, PyPA, Go,
+RustSec e outras fontes — inclusive CVEs que a NVD não enriqueceu com CPE e pacotes maliciosos
+conhecidos (MAL-*): com --osv-local, na base local (~/.nist-aegis/bases/osv.sqlite, criada pelo
+download_osv.py), sem rede; sem ele, na API (api.osv.dev). Quando há base local da NVD
+(~/.nist-aegis/bases/nvd.sqlite, ou ~/.nvd/nvd.sqlite de versões anteriores), completa cada CVE
+com a nota, o CWE e a data de entrada no catálogo KEV da CISA.
 
-Privacidade: no modo online, nome e versão de cada pacote vão para api.osv.dev. Pacote npm
-resolvido fora do registro público e nome que case --nao-enviar ficam de fora; com --offline
-nada sai da máquina e só o inventário é produzido.
+Privacidade: no modo online, só nome, ecossistema e versão de cada pacote vão para api.osv.dev.
+Ficam de fora, em qualquer ecossistema: pacote que o projeto declara com fonte fora do registro
+público (git, URL, caminho local, índice ou registro privado), escopo npm com registro próprio
+(.npmrc, .yarnrc.yml), módulo Go coberto por GOPRIVATE/GONOPROXY/GONOSUMDB, versão que é URL ou
+caminho, membro de workspace e nome que case --nao-enviar. Com --offline nada sai da máquina e
+só o inventário é produzido.
 
-Só biblioteca padrão; Python 3.11 ou superior (tomllib). Nunca executa nada do projeto e nunca
+Só biblioteca padrão; Python 3.11 ou superior (tomllib). Nunca executa nada do projeto, não
+segue link simbólico, tira usuário, senha e token das URLs de origem antes de gravar e nunca
 imprime valor de token encontrado em configuração de gerenciador.
 
 Códigos de saída: 0 inventário gravado (mesmo com vulnerabilidades ou falha na consulta, que
@@ -26,11 +32,13 @@ fica registrada no JSON), 2 argumento inválido, 3 erro de execução.
 
 import argparse
 import concurrent.futures
+import fnmatch
 import json
 import math
 import os
 import re
 import sqlite3
+import stat
 import sys
 import time
 import urllib.error
@@ -44,12 +52,17 @@ except ImportError:  # Python < 3.11
     tomllib = None
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bases  # noqa: E402
 import nvd_common as nc  # noqa: E402
+import osv_local  # noqa: E402
+
+IDADE_MAXIMA_DIAS = 7
 
 OSV_BATCH = "https://api.osv.dev/v1/querybatch"
 OSV_VULN = "https://api.osv.dev/v1/vulns/%s"
 BATCH_SIZE = 1000
 DETAIL_WORKERS = 8
+MAX_FILE_BYTES = 64 * 1024 * 1024
 
 EXCLUDED_DIRS = {
     "node_modules", ".venv", "venv", "vendor", "dist", "build", ".git", "target", "out",
@@ -96,9 +109,25 @@ def rel(root, path):
     return os.path.relpath(path, root).replace("\\", "/")
 
 
+def read_bytes(path):
+    """Só arquivo comum e dentro do teto: link simbólico levaria a leitura para fora do
+    repositório (um requirements.txt apontando para ~/.aws/credentials)."""
+    try:
+        st = os.lstat(path)
+    except OSError as exc:
+        raise ScanError("não foi possível abrir: %s" % type(exc).__name__)
+    if stat.S_ISLNK(st.st_mode):
+        raise ScanError("link simbólico não é seguido")
+    if not stat.S_ISREG(st.st_mode):
+        raise ScanError("não é arquivo comum")
+    if st.st_size > MAX_FILE_BYTES:
+        raise ScanError("arquivo acima de %d MB" % (MAX_FILE_BYTES // (1024 * 1024)))
+    with open(path, "rb") as fh:
+        return fh.read(MAX_FILE_BYTES + 1)[:MAX_FILE_BYTES]
+
+
 def read_text(path):
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        return fh.read()
+    return read_bytes(path).decode("utf-8", errors="replace")
 
 
 def pep503(name):
@@ -112,6 +141,17 @@ def host_of(url):
         return ""
 
 
+_URL_USERINFO = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)([^/@\s?#]*)@")
+
+
+def sem_credencial(url):
+    """Tira usuário e senha ou token de uma URL (https://ghp_…@github.com, https://u:s@host):
+    o JSON é lido por agentes e entra no contexto do modelo. Só o usuário `git` do SSH fica."""
+    if not isinstance(url, str):
+        return url
+    return _URL_USERINFO.sub(lambda m: m.group(0) if m.group(2) == "git" else m.group(1) + "<credencial removida>@", url)
+
+
 # ---------------------------------------------------------------- descoberta
 
 def discover(root, extra_excluded=()):
@@ -120,7 +160,7 @@ def discover(root, extra_excluded=()):
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(d for d in dirnames if d not in excluded)
         for name in sorted(filenames):
-            if name in LOCKFILES or name in MANIFESTS or name in UNSUPPORTED or name == ".npmrc" \
+            if name in LOCKFILES or name in MANIFESTS or name in UNSUPPORTED or name in (".npmrc", ".yarnrc.yml") \
                     or re.match(r"^requirements.*\.txt$", name) or name == "pyproject.toml":
                 found.append(os.path.join(dirpath, name))
     return found
@@ -130,7 +170,7 @@ def _pkg(eco, name, version, arquivo, linha, direto=None, dev=None, cadeia=None,
          licenca=None, script_instalacao=None):
     return {
         "ecossistema": eco, "nome": name, "versao": version, "arquivo": arquivo, "linha": linha,
-        "direto": direto, "dev": dev, "cadeia": cadeia, "origem": origem, "licenca": licenca,
+        "direto": direto, "dev": dev, "cadeia": cadeia, "origem": sem_credencial(origem), "licenca": licenca,
         "script_instalacao": script_instalacao,
     }
 
@@ -189,6 +229,8 @@ def parse_package_lock(root, path):
         for key, info in packages.items():
             if not key or info.get("link") or not info.get("version"):
                 continue
+            if not key.startswith("node_modules/") and "/node_modules/" not in key:
+                continue  # membro do workspace (packages/app): código do próprio projeto
             name = info.get("name") or key.rsplit("node_modules/", 1)[-1]
             top = key.count("node_modules/") == 1 and key.startswith("node_modules/")
             out.append(_pkg(
@@ -225,9 +267,14 @@ def parse_yarn_lock(root, path):
     berry = "__metadata:" in text
     header = None
     header_line = None
+    atual = None
     for i, line in enumerate(text.splitlines(), 1):
         if line and not line.startswith((" ", "#")) and line.rstrip().endswith(":"):
-            header, header_line = line.rstrip()[:-1], i
+            header, header_line, atual = line.rstrip()[:-1], i, None
+            continue
+        r = re.match(r'^\s+resolved\s+"?([^"\s]+)"?\s*$', line)
+        if r and atual is not None and not berry:
+            atual["origem"] = sem_credencial(r.group(1))
             continue
         if header is None:
             continue
@@ -241,7 +288,8 @@ def parse_yarn_lock(root, path):
             if m:
                 spec = header.split(",")[0].strip().strip('"')
                 name = spec.rsplit("@", 1)[0] if spec.count("@") > (1 if spec.startswith("@") else 0) else spec
-                out.append(_pkg("npm", name, m.group(1), arquivo, header_line))
+                atual = _pkg("npm", name, m.group(1), arquivo, header_line)
+                out.append(atual)
                 header = None
     return _dedup(out)
 
@@ -251,15 +299,23 @@ def parse_pnpm_lock(root, path):
     arquivo = rel(root, path)
     out = []
     section = None
+    atual = None
     for i, line in enumerate(text.splitlines(), 1):
         if re.match(r"^[a-zA-Z]", line):
             section = line.split(":", 1)[0].strip()
+            atual = None
             continue
         if section not in ("packages", "snapshots"):
             continue
         m = re.match(r"^  '?/?((?:@[^@/\s']+/)?[^@/\s']+)@([0-9][^\s:()']*)", line)
         if m:
-            out.append(_pkg("npm", m.group(1), m.group(2), arquivo, i))
+            atual = _pkg("npm", m.group(1), m.group(2), arquivo, i)
+            out.append(atual)
+            continue
+        # o pnpm só grava tarball quando o pacote não vem do registro padrão
+        t = re.search(r"\btarball:\s*'?([^\s,}']+)", line)
+        if t and atual is not None and line.startswith("    "):
+            atual["origem"] = sem_credencial(t.group(1))
     return _dedup(out)
 
 
@@ -325,8 +381,7 @@ def parse_pipfile_lock(root, path, extras):
 def _toml(path):
     if tomllib is None:
         raise ScanError("Python 3.11 ou superior é necessário para ler %s" % os.path.basename(path))
-    with open(path, "rb") as fh:
-        return tomllib.load(fh)
+    return tomllib.loads(read_text(path))
 
 
 def _toml_lines(text, key="name"):
@@ -349,8 +404,9 @@ def parse_poetry_or_uv(root, path, extras):
         source = pkg.get("source") or {}
         if not name or not version:
             continue
-        if isinstance(source, dict) and (source.get("editable") or source.get("virtual") or source.get("directory")):
-            continue  # o próprio projeto ou um caminho local
+        if isinstance(source, dict) and (source.get("editable") or source.get("virtual") or source.get("directory")
+                                         or source.get("type") == "directory"):
+            continue  # o próprio projeto ou um caminho local (uv usa a chave, o poetry usa type)
         if isinstance(source, dict) and (source.get("git") or source.get("url") or source.get("type") in ("git", "url", "file")):
             extras["fonte_fora_do_registro"].append({
                 "arquivo": arquivo, "linha": lines.get(name.lower()), "nome": pep503(name),
@@ -411,7 +467,7 @@ def parse_cargo_lock(root, path, extras):
                 and not source.startswith("sparse+https://index.crates.io"):
             extras["fonte_fora_do_registro"].append({
                 "arquivo": arquivo, "linha": lines.get(pkg.get("name", "").lower()),
-                "nome": pkg.get("name"), "origem": source.split("#")[0]})
+                "nome": pkg.get("name"), "origem": sem_credencial(source.split("#")[0])})
         out.append(_pkg("crates.io", pkg["name"], pkg["version"], arquivo, lines.get(pkg["name"].lower())))
     return out
 
@@ -459,7 +515,8 @@ def parse_gemfile_lock(root, path, extras):
             continue
         if section in ("GIT", "PATH") and raw.strip().startswith("remote:"):
             extras["fonte_fora_do_registro"].append(
-                {"arquivo": arquivo, "linha": i, "nome": None, "origem": section + " " + raw.split(":", 1)[1].strip()})
+                {"arquivo": arquivo, "linha": i, "nome": None,
+                 "origem": section + " " + sem_credencial(raw.split(":", 1)[1].strip())})
         m = re.match(r"^    ([A-Za-z0-9_.-]+) \(([^)]+)\)$", raw)
         if m and section == "GEM":
             version = re.split(r"-(?=(?:x86|x64|arm|aarch|java|universal|mingw|mswin))", m.group(2))[0]
@@ -559,6 +616,27 @@ def check_npmrc(root, path, extras):
                 "origem": "registro " + host_of(m.group(2))})
 
 
+def check_yarnrc(root, path, extras):
+    """Yarn Berry: npmRegistryServer global e npmScopes. Só host e nome do escopo; nunca o token
+    (npmAuthToken) que o arquivo possa trazer."""
+    arquivo = rel(root, path)
+    in_scopes = False
+    for i, line in enumerate(read_text(path).splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" "):
+            in_scopes = line.startswith("npmScopes:")
+            m = re.match(r'^npmRegistryServer:\s*"?([^"\s]+)"?', line)
+            if m and host_of(m.group(1)) not in PUBLIC_NPM_HOSTS:
+                extras["fonte_fora_do_registro"].append({
+                    "arquivo": arquivo, "linha": i, "nome": None, "origem": "registro " + host_of(m.group(1))})
+            continue
+        s = re.match(r"^  ['\"]?@?([\w.-]+)['\"]?:\s*$", line)
+        if in_scopes and s:
+            extras["fonte_fora_do_registro"].append({
+                "arquivo": arquivo, "linha": i, "nome": "@" + s.group(1), "origem": "escopo com registro próprio"})
+
+
 def _has_lock_up(root, directory, candidates):
     current = os.path.abspath(directory)
     root = os.path.abspath(root)
@@ -574,7 +652,7 @@ def _has_lock_up(root, directory, candidates):
 
 def http_json(url, body=None, timeout=60, retries=4):
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    headers = {"User-Agent": "nist-aegis/1.1", "Content-Type": "application/json"}
+    headers = {"User-Agent": "nist-aegis/1.2", "Content-Type": "application/json"}
     delay = 2.0
     for attempt in range(1, retries + 1):
         req = urllib.request.Request(url, data=data, headers=headers, method="POST" if data else "GET")
@@ -792,19 +870,146 @@ def summarize_vuln(vuln, eco, name, nvd):
     }
 
 
-def private_reason(pkg, never_send):
-    for pattern in never_send:
-        if pattern.search(pkg["nome"]):
+_VERSAO_NAO_NUMERICA = re.compile(r"(?i)^(?:[a-z][a-z0-9+.-]*:|/|\.{1,2}/|~)")
+_NOME_ESTRANHO = re.compile(r"[\s\"'<>\\`]|://")
+
+
+def _nome_normalizado(nome):
+    return pep503(nome or "")
+
+
+def go_private_patterns(environ=None):
+    """GOPRIVATE, GONOPROXY e GONOSUMDB do ambiente de quem audita: o próprio Go não manda esses
+    módulos ao proxy público, e a consulta ao OSV também não deve mandar."""
+    environ = os.environ if environ is None else environ
+    pats = []
+    for var in ("GOPRIVATE", "GONOPROXY", "GONOSUMDB"):
+        pats += [p.strip() for p in environ.get(var, "").split(",") if p.strip()]
+    return pats
+
+
+def go_is_private(module, patterns):
+    parts = module.split("/")
+    for pattern in patterns:
+        n = pattern.count("/") + 1
+        if len(parts) >= n and fnmatch.fnmatchcase("/".join(parts[:n]), pattern):
+            return True
+    return False
+
+
+def private_context(extras, never_send=(), environ=None):
+    """Tudo o que o projeto declara como fonte privada vira regra de não envio."""
+    nomes, escopos = set(), set()
+    for item in extras.get("fonte_fora_do_registro") or []:
+        nome = item.get("nome")
+        if not isinstance(nome, str) or not nome:
+            continue
+        if nome.startswith("@") and "/" not in nome:
+            escopos.add(nome.lower())
+        else:
+            nomes.add(_nome_normalizado(nome))
+    return {"never_send": list(never_send), "nomes": nomes, "escopos_npm": escopos,
+            "go": go_private_patterns(environ)}
+
+
+def private_reason(pkg, ctx):
+    """Motivo para o pacote NÃO ir ao OSV, ou None. Na dúvida, não envia."""
+    nome, versao, eco = pkg.get("nome"), pkg.get("versao"), pkg.get("ecossistema")
+    if not isinstance(nome, str) or not isinstance(versao, str) or not nome or not versao:
+        return "nome ou versão ausente ou fora do formato"
+    if len(nome) > 214 or _NOME_ESTRANHO.search(nome):
+        return "nome fora do formato de pacote"
+    if len(versao) > 128 or _VERSAO_NAO_NUMERICA.match(versao) or _NOME_ESTRANHO.search(versao):
+        return "versão não é número de versão (URL, caminho ou protocolo)"
+    for pattern in ctx["never_send"]:
+        if pattern.search(nome):
             return "nome casa --nao-enviar"
+    if _nome_normalizado(nome) in ctx["nomes"]:
+        return "declarado com fonte fora do registro público"
+    if eco == "npm" and nome.startswith("@") and nome.split("/", 1)[0].lower() in ctx["escopos_npm"]:
+        return "escopo npm com registro privado (%s)" % nome.split("/", 1)[0]
+    if eco == "Go" and go_is_private(nome, ctx["go"]):
+        return "módulo privado pelo GOPRIVATE/GONOPROXY/GONOSUMDB"
     origem = pkg.get("origem") or ""
-    if pkg["ecossistema"] == "npm" and origem.startswith("http") and host_of(origem) not in PUBLIC_NPM_HOSTS:
+    if eco == "npm" and origem.startswith("http") and host_of(origem) not in PUBLIC_NPM_HOSTS:
         return "resolvido fora do registro público (%s)" % host_of(origem)
-    if pkg["ecossistema"] == "npm" and origem and not origem.startswith("http"):
+    if eco == "npm" and origem and not origem.startswith("http"):
         return "origem não é o registro público"
     return None
 
 
-def scan(root, db=None, offline=False, extra_excluded=(), never_send=(), max_pacotes=20000):
+def _selecionar(pacotes, extras, never_send, max_pacotes, consulta):
+    """Aplica o filtro de privado e o teto; devolve {(eco, nome, versão): [pacotes]}. O filtro
+    vale também no modo local: pacote privado com o mesmo nome de um público casaria o aviso
+    do público e viraria falso positivo."""
+    unicos = {}
+    ctx = private_context(extras, never_send)
+    for pkg in pacotes:
+        motivo = private_reason(pkg, ctx)
+        if motivo:
+            consulta["nao_enviados"].append({"nome": pkg["nome"], "ecossistema": pkg["ecossistema"], "motivo": motivo})
+            continue
+        unicos.setdefault((pkg["ecossistema"], pkg["nome"], pkg["versao"]), []).append(pkg)
+    if len(unicos) > max_pacotes:
+        consulta["status"] = "parcial"
+        consulta["erros"].append("inventário com %d pacotes; consultados só os primeiros %d (--max-pacotes)"
+                                 % (len(unicos), max_pacotes))
+        unicos = dict(list(unicos.items())[:max_pacotes])
+    return unicos
+
+
+def consultar_local(unicos, osv_db, nvd, consulta, limites):
+    """Consulta na base OSV local, sem rede. Devolve (vulneraveis, estado da base)."""
+    vulneraveis = []
+    try:
+        base = osv_local.BaseOsvLocal(osv_db)
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        consulta["status"] = "indisponivel"
+        consulta["erros"].append("%s. Para criar: python download_osv.py" % exc)
+        return vulneraveis, {"caminho": bases.resolve_osv(osv_db), "estado": "ausente", "ecossistemas": {}}
+    estado = {"caminho": base.path, "estado": "erro", "ecossistemas": {}}
+    try:
+        estado = base.estado()
+        faltando = set()
+        velhos = set()
+        for chave, pkgs in unicos.items():
+            eco, nome, versao = chave
+            info_eco = estado["ecossistemas"].get(eco)
+            if not info_eco:
+                faltando.add(eco)
+                consulta["nao_avaliados"].append({"nome": nome, "ecossistema": eco, "versao": versao,
+                                                  "motivo": "ecossistema não está na base local"})
+                continue
+            if (info_eco.get("idade_dias") or 0) > IDADE_MAXIMA_DIAS:
+                velhos.add(eco)
+            registros, indeterminados = base.consultar(eco, nome, versao)
+            consulta["pacotes_consultados"] += 1
+            if indeterminados:
+                consulta["nao_avaliados"].append({"nome": nome, "ecossistema": eco, "versao": versao,
+                                                  "ids": indeterminados,
+                                                  "motivo": "versão ou faixa num formato que o comparador não reconhece"})
+            vulns = [summarize_vuln(r, eco, nome, nvd) for r in registros if not r.get("withdrawn")]
+            if vulns:
+                for pkg in pkgs:
+                    vulneraveis.append(dict(pkg, vulnerabilidades=vulns))
+    except sqlite3.Error as exc:
+        consulta["status"] = "falhou"
+        consulta["erros"].append("erro na base OSV local: %s" % exc)
+        return vulneraveis, estado
+    finally:
+        base.close()
+    if consulta["nao_avaliados"] and consulta["status"] == "ok":
+        consulta["status"] = "parcial"
+    if faltando:
+        limites.append("Ecossistema(s) fora da base OSV local, não avaliado(s): %s. Para baixar: "
+                       "python download_osv.py --ecossistemas %s" % (", ".join(sorted(faltando)), ",".join(sorted(faltando))))
+    if velhos:
+        limites.append("Base OSV local com mais de %d dias em %s: aviso publicado depois disso não aparece. "
+                       "Para atualizar: python download_osv.py --update" % (IDADE_MAXIMA_DIAS, ", ".join(sorted(velhos))))
+    return vulneraveis, estado
+
+
+def scan(root, db=None, offline=False, extra_excluded=(), never_send=(), max_pacotes=20000, osv_db=None):
     if not os.path.isdir(root):
         raise ScanError("raiz não encontrada: %s" % root)
     extras = {"sem_pin": [], "fonte_fora_do_registro": []}
@@ -816,32 +1021,42 @@ def scan(root, db=None, offline=False, extra_excluded=(), never_send=(), max_pac
     for path in discover(root, extra_excluded):
         name = os.path.basename(path)
         arquivo = rel(root, path)
-        if name == ".npmrc":
-            check_npmrc(root, path, extras)
-            continue
         if name in UNSUPPORTED:
             nao_suportados.append({"arquivo": arquivo, "motivo": UNSUPPORTED[name]})
-            continue
-        if name in MANIFESTS:
-            eco, locks = MANIFESTS[name]
-            has_lock = _has_lock_up(root, os.path.dirname(path), locks)
-            if name == "package.json":
-                check_package_json(root, path, has_lock, extras)
-            if not has_lock:
-                arquivos.append({"arquivo": arquivo, "tipo": "manifesto", "gerenciador": eco,
-                                 "lockfile": "ausente"})
             continue
         if name == "pyproject.toml":
             continue
         parser = PARSERS.get(name)
         if name.startswith("requirements") and name.endswith(".txt"):
             parser = parse_requirements
-        if parser is None:
+        if parser is None and name not in MANIFESTS and name not in (".npmrc", ".yarnrc.yml"):
             continue
+        # O repositório não é confiável: um lockfile malformado ou hostil (tipo inesperado,
+        # aninhamento que estoura a recursão) vira erro registrado, nunca derruba o scan.
         try:
+            if name == ".npmrc":
+                check_npmrc(root, path, extras)
+                continue
+            if name == ".yarnrc.yml":
+                check_yarnrc(root, path, extras)
+                continue
+            if name in MANIFESTS:
+                eco, locks = MANIFESTS[name]
+                has_lock = _has_lock_up(root, os.path.dirname(path), locks)
+                if name == "package.json":
+                    check_package_json(root, path, has_lock, extras)
+                if not has_lock:
+                    arquivos.append({"arquivo": arquivo, "tipo": "manifesto", "gerenciador": eco,
+                                     "lockfile": "ausente"})
+                continue
             found = parser(root, path, extras)
-        except (ValueError, KeyError, ScanError) as exc:
-            erros.append("%s: não foi possível ler (%s)" % (arquivo, exc))
+            if not isinstance(found, list) or not all(
+                    isinstance(p.get("nome"), str) and isinstance(p.get("versao"), str) for p in found):
+                raise ScanError("estrutura inesperada: nome ou versão que não é texto")
+        except Exception as exc:  # noqa: BLE001 — de propósito, ver acima
+            detalhe = str(exc)[:200] if isinstance(exc, (ScanError, ValueError)) else ""
+            erros.append("%s: não foi possível ler (%s%s)" % (arquivo, type(exc).__name__,
+                                                              ": " + detalhe if detalhe else ""))
             continue
         pacotes.extend(found)
         arquivos.append({"arquivo": arquivo, "tipo": "lockfile" if name in lock_names else "requisitos",
@@ -851,27 +1066,27 @@ def scan(root, db=None, offline=False, extra_excluded=(), never_send=(), max_pac
 
     pacotes = _dedup(pacotes)
     nvd = NvdLocal(db)
-    consulta = {"fonte": "api.osv.dev", "status": "desligada" if offline else "ok",
-                "pacotes_enviados": 0, "nao_enviados": [], "erros": []}
+    consulta = {"fonte": "api.osv.dev", "modo": "online", "status": "ok", "pacotes_enviados": 0,
+                "pacotes_consultados": 0, "nao_enviados": [], "nao_avaliados": [], "erros": []}
     vulneraveis = []
-    if offline:
-        consulta["fonte"] = "desligada (--offline): nada saiu da máquina"
+    base_osv = None
+    limites = [
+        "Inventário só dos lockfiles e manifestos listados em `arquivos`; dependência instalada fora deles não aparece.",
+        "A consulta casa nome e versão exata; alcançabilidade do código vulnerável não é avaliada aqui.",
+    ]
+    if osv_db:
+        consulta.update(fonte="base OSV local (sem rede): nada saiu da máquina", modo="local")
+        unicos = _selecionar(pacotes, extras, never_send, max_pacotes, consulta)
+        vulneraveis, base_osv = consultar_local(unicos, osv_db, nvd, consulta, limites)
+    elif offline:
+        consulta.update(fonte="desligada (--offline): nada saiu da máquina", modo="desligada", status="desligada")
     else:
-        unicos = {}
-        for pkg in pacotes:
-            motivo = private_reason(pkg, never_send)
-            if motivo:
-                consulta["nao_enviados"].append({"nome": pkg["nome"], "ecossistema": pkg["ecossistema"], "motivo": motivo})
-                continue
-            unicos.setdefault((pkg["ecossistema"], pkg["nome"], pkg["versao"]), []).append(pkg)
-        chaves = list(unicos)[:max_pacotes]
-        if len(unicos) > max_pacotes:
-            consulta["erros"].append("inventário com %d pacotes; consultados só os primeiros %d (--max-pacotes)"
-                                     % (len(unicos), max_pacotes))
+        unicos = _selecionar(pacotes, extras, never_send, max_pacotes, consulta)
+        chaves = list(unicos)
         queries = [{"package": {"name": n, "ecosystem": e}, "version": v} for (e, n, v) in chaves]
         try:
             ids = osv_query(queries) if queries else []
-            consulta["pacotes_enviados"] = len(queries)
+            consulta["pacotes_enviados"] = consulta["pacotes_consultados"] = len(queries)
             todos_ids = sorted({i for lista in ids for i in lista})
             detalhes, erros_detalhe = osv_details(todos_ids) if todos_ids else ({}, [])
             if erros_detalhe:
@@ -896,10 +1111,6 @@ def scan(root, db=None, offline=False, extra_excluded=(), never_send=(), max_pac
     por_eco = {}
     for pkg in pacotes:
         por_eco[pkg["ecossistema"]] = por_eco.get(pkg["ecossistema"], 0) + 1
-    limites = [
-        "Inventário só dos lockfiles e manifestos listados em `arquivos`; dependência instalada fora deles não aparece.",
-        "A consulta casa nome e versão exata; alcançabilidade do código vulnerável não é avaliada aqui.",
-    ]
     if nao_suportados:
         limites.append("Arquivos em `nao_suportados` não entraram no inventário.")
     return {
@@ -908,6 +1119,7 @@ def scan(root, db=None, offline=False, extra_excluded=(), never_send=(), max_pac
         "gerado_em": now_iso(),
         "raiz": os.path.abspath(root),
         "consulta": consulta,
+        "base_osv": base_osv,
         "base_nvd": nvd.info,
         "arquivos": arquivos,
         "nao_suportados": nao_suportados,
@@ -926,8 +1138,12 @@ def build_parser():
     parser = argparse.ArgumentParser(description="Inventário de dependências e consulta de vulnerabilidades.")
     parser.add_argument("--raiz", required=True, help="raiz do projeto auditado")
     parser.add_argument("--saida", required=True, help="arquivo JSON de saída")
-    parser.add_argument("--db", help="base local da NVD para completar nota, CWE e KEV")
-    parser.add_argument("--offline", action="store_true", help="não consulta o OSV; só o inventário")
+    parser.add_argument("--db", help="base local da NVD para completar nota, CWE e KEV (padrão: %s, "
+                                     "ou ~/.nvd/nvd.sqlite de versões anteriores, quando existir)" % bases.nvd_default())
+    parser.add_argument("--osv-local", nargs="?", const=bases.osv_default(), metavar="CAMINHO",
+                        help="consulta a base OSV local em vez da API: nada sai da máquina "
+                             "(padrão: %s)" % bases.osv_default())
+    parser.add_argument("--offline", action="store_true", help="sem rede; sem --osv-local, só o inventário")
     parser.add_argument("--excluir", action="append", default=[], help="diretório a excluir (repetível)")
     parser.add_argument("--nao-enviar", action="append", default=[],
                         help="expressão regular de nome de pacote que nunca vai ao OSV (repetível)")
@@ -944,9 +1160,12 @@ def main(argv=None):
         never_send = [re.compile(p) for p in args.nao_enviar]
     except re.error as exc:
         parser.error("--nao-enviar inválido: %s" % exc)
+    db = args.db
+    if db is None and os.path.exists(bases.resolve_nvd()):
+        db = bases.resolve_nvd()
     try:
-        resultado = scan(args.raiz, db=args.db, offline=args.offline, extra_excluded=args.excluir,
-                         never_send=never_send, max_pacotes=args.max_pacotes)
+        resultado = scan(args.raiz, db=db, offline=args.offline, extra_excluded=args.excluir,
+                         never_send=never_send, max_pacotes=args.max_pacotes, osv_db=args.osv_local)
         saida = os.path.abspath(args.saida)
         os.makedirs(os.path.dirname(saida), exist_ok=True)
         with open(saida, "w", encoding="utf-8") as fh:
@@ -956,10 +1175,10 @@ def main(argv=None):
         return nc.EXIT_ERROR
     cves = {c for p in resultado["vulneraveis"] for v in p["vulnerabilidades"] for c in v["cve"]}
     print("sca_scan: %d pacote(s) em %d arquivo(s); %d vulnerável(is), %d CVE(s), %d malicioso(s); "
-          "consulta: %s; resultado em %s" % (
+          "consulta: %s (%s); resultado em %s" % (
               resultado["inventario"]["total"], len(resultado["arquivos"]),
               len(resultado["vulneraveis"]), len(cves), len(resultado["maliciosos"]),
-              resultado["consulta"]["status"], saida))
+              resultado["consulta"]["status"], resultado["consulta"]["modo"], saida))
     return nc.EXIT_OK
 
 

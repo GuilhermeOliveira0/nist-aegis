@@ -274,10 +274,11 @@ Prontidão pós-quântica (NIST IR 8547, rascunho) não é achado nesta versão.
 ## Vulnerabilidade em dependência
 
 O orquestrador roda `sca_scan.py` uma vez, antes dos caçadores. O script lê os lockfiles,
-consulta o **OSV** (api.osv.dev) por nome e versão exata — com as faixas nativas do GitHub
-Advisory Database, PyPA, Go, RustSec e outras fontes — e completa cada CVE com a nota, o CWE e a
-data de entrada no catálogo KEV da CISA a partir da base local da NVD, quando ela existe. O
-`cacador-dependencias` lê o JSON e decide a alcançabilidade.
+consulta o **OSV** por nome e versão exata — na base local, por padrão, ou na API com
+`--online` —, com as faixas nativas do GitHub Advisory Database, PyPA, Go, RustSec e outras
+fontes, e completa cada CVE com a nota, o CWE e a data de entrada no catálogo KEV da CISA a partir
+da base local da NVD, quando ela existe. O `cacador-dependencias` lê o JSON e decide a
+alcançabilidade.
 
 Por que não só a NVD: desde abril de 2026 a NVD enriquece com CPE e nota própria apenas os CVEs
 do KEV, de software usado pelo governo federal americano e de "critical software" (EO 14028).
@@ -285,8 +286,9 @@ A maioria dos CVEs novos fica sem CPE, e uma consulta que dependa só dele não 
 SSDF RV.1.1 pede reunir informação de vulnerabilidade de fontes públicas; a NVD continua como
 fonte do metadado de cada CVE.
 
-Privacidade: no modo online, nome e versão de cada pacote público vão para api.osv.dev. Pacote
-npm resolvido fora do registro público não é enviado; com o argumento `--offline`, nada sai da
-máquina e só o inventário é produzido. O que foi e o que não foi enviado vai ao Apêndice B.
+Privacidade: na base local, nada sai da máquina. Com `--online`, nome, ecossistema e versão de
+cada pacote público vão para api.osv.dev, e o que o projeto declara como privado fica de fora;
+com `--offline`, não há consulta e só o inventário é produzido. O modo, a data da base e o que
+não foi consultado ou avaliado vão ao Apêndice B.
 
 Todo achado de vulnerabilidade em dependência se correlaciona a **SP 800-218 RV.1**.

@@ -19,7 +19,7 @@
   - as regras com caminho relativo ao projeto (`.claude/skills/cve/scripts/...`): pré-aprovavam
     executar um script que o repositório auditado trouxesse (CWE-426);
   - todas as regras de `download_db.py`: atualizar a base é decisão do usuário (regra 10 da
-    skill `audit`);
+    skill `audit`). Pelo mesmo motivo, `download_osv.py` (1.2.0) nunca entra em `allow`;
   - a raiz `~/.claude/plugins/nist/`: a instalação por marketplace fica em
     `~/.claude/plugins/cache/<marketplace>/<plugin>/<versão>/`. Ao escrever regra para esse
     caminho, fixe a versão: `*` no meio de uma regra casa qualquer texto, inclusive `../`.

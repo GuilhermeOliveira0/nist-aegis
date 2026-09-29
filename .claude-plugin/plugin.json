@@ -1,6 +1,6 @@
 {
   "name": "nist",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Auditoria de código-fonte guiada por NIST (SSDF SP 800-218, SP 800-53 Rev. 5, CSF 2.0, SP 800-63B-4, FIPS 140-3 / SP 800-131A) com nove subagentes especializados, inventário determinístico do projeto e consulta de vulnerabilidades por pacote e versão (OSV, com nota, CWE e KEV da NVD). Correlaciona cada achado com CWE e OWASP Top 10:2025, valida falso positivo, atribui severidade e grava relatório versionado por data com JSON para comparação. Projeto independente, sem afiliação com o NIST.",
   "author": {
     "name": "GuilhermeOliveira0",

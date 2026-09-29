@@ -48,8 +48,12 @@ vulnerabilidade e relatórios anteriores.
   modelo não é fonte, e errar aqui gera achado falso ou esconde um real.
 - Sem o JSON, as categorias 1, 6 e 8 ficam `nao_verificada`, com o motivo recebido, e você
   entrega só o que se verifica lendo manifestos, lockfiles, Dockerfile e pipeline.
-- `consulta.status` diferente de `ok` (`falhou`, `parcial`, `desligada`) vai para o cabeçalho e
-  para a cobertura como veio: consulta pendente não é ausência de vulnerabilidade.
+- `consulta.status` diferente de `ok` (`falhou`, `parcial`, `desligada`, `indisponivel`) vai
+  para o cabeçalho e para a cobertura como veio: consulta pendente não é ausência de
+  vulnerabilidade.
+- Pacote em `consulta.nao_avaliados` (ecossistema fora da base local, ou versão que o comparador
+  não reconhece) **não** é pacote sem vulnerabilidade: as categorias 1, 6 e 8 ficam
+  `nao_verificada` para ele, com o motivo do JSON.
 
 ## Categorias do domínio — todas
 
@@ -85,8 +89,9 @@ vulnerabilidade e relatórios anteriores.
 
 ## Procedimento
 
-1. Leia o JSON do `sca_scan` inteiro. Registre no cabeçalho a fonte, o status da consulta, o
-   estado da base NVD e o que não foi enviado ao OSV.
+1. Leia o JSON do `sca_scan` inteiro. Registre no cabeçalho a fonte, o modo e o status da
+   consulta, a data da base OSV local quando o modo for `local`, o estado da base NVD, o que não
+   foi consultado e o que não foi avaliado.
 2. Para cada pacote em `vulneraveis`, decida a **alcançabilidade** lendo o código: procure com
    Grep o `import`/`require`/`use` do pacote e, quando o resumo da vulnerabilidade citar função,
    módulo ou opção, o uso dela. Registre `usado`, `nao_usado` ou `indeterminado`, com arquivo e
@@ -105,10 +110,13 @@ Cabeçalho, cobertura e candidatos. Prefixo de `id`: `DEP`.
 ```yaml
 consulta:
   fonte: <consulta.fonte do JSON, ou "sem consulta de vulnerabilidade">
+  modo: local | online | desligada
   status: ok | parcial | falhou | desligada | indisponivel
   motivo: <quando não for ok: o erro do JSON ou o motivo recebido do orquestrador>
+  base_osv: <no modo local: data e idade de cada ecossistema de base_osv; senão "não usada">
   base_nvd: <estado e last_sync da base_nvd do JSON, ou "não usada">
   nao_enviados: <quantos pacotes ficaram fora da consulta e por quê, ou "nenhum">
+  nao_avaliados: <quantos pacotes de consulta.nao_avaliados e por quê, ou "nenhum">
 cobertura:
   - categoria: <número e nome>
     status: com_candidatos | sem_achado | sem_superficie | nao_verificada

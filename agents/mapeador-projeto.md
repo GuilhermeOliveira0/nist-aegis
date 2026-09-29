@@ -40,6 +40,8 @@ anteriores.
 `diretorios_excluidos`, `por_linguagem`, `manifestos`, `lockfiles`, `infra` (Dockerfiles,
 compose, Kubernetes, IaC, CI), `configuracao_de_agente`, `unicode_oculto`, `c_cpp`, `git` e
 `escopo`. Os arquivos citados em `segredos_candidatos` entram na superfície `crypto_secrets`.
+Os caminhos em `links_simbolicos` não foram lidos pelo script porque o destino pode estar fora do
+repositório: não os leia nem os siga; liste-os em `observacoes`.
 
 **É seu, por leitura:** pontos de entrada, autenticação aplicada globalmente, fronteiras de
 confiança e as superfícies de cada domínio.

@@ -217,7 +217,7 @@ def request_json(params, key, timeout=90, max_retries=6):
     NvdRequestError — inclusive em 404, que a NVD usa para parâmetro recusado, nunca para
     "fim da paginação"."""
     url = API_URL + "?" + urllib.parse.urlencode(params)
-    headers = {"User-Agent": "nist-aegis/1.1"}
+    headers = {"User-Agent": "nist-aegis/1.2"}
     if key:
         headers["apiKey"] = key
     delay = 4.0

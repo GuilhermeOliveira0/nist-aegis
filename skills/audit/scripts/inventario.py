@@ -15,8 +15,10 @@ Também aponta configuração de agente de IA dentro do repositório (`.claude/`
 `CLAUDE.md`, `AGENTS.md`, regras de Cursor e Copilot) e caractere Unicode invisível nesses
 arquivos, que o Claude Code carrega como instrução quando a pasta é confiada.
 
-O git roda endurecido para repositório não confiável: sem fsmonitor, sem diff externo, sem
-textconv, sem pager e sem regravar o índice. Nunca executa nada do projeto.
+O git roda endurecido para repositório não confiável: executável resolvido fora da raiz, sem
+fsmonitor, sem diff externo, sem textconv, sem pager, sem regravar o índice e sem nenhum acesso
+a remote (nem o fetch preguiçoso de partial clone). Link simbólico não é seguido. Nunca executa
+nada do projeto.
 
 Só biblioteca padrão. Códigos de saída: 0 inventário gravado, 2 argumento inválido, 3 erro.
 """
@@ -25,6 +27,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -110,11 +113,19 @@ SECRET_PATTERNS = (
 )
 # Identificador que contém a palavra-chave, com prefixo e sufixo de snake_case ou camelCase
 # (DB_PASSWORD, JWT_SECRET, SECRET_KEY, apiKey), mas não palavra maior (tokenizer, secretary).
+SECRET_KEYWORDS = (r"(?:password|passwd|pwd|senha|secret|token|api[_-]?key|access[_-]?key|"
+                   r"private[_-]?key|client[_-]?secret)(?:[_-]?key)?")
 GENERIC_SECRET = re.compile(
-    r"(?i)(?<![A-Za-z0-9])([A-Za-z0-9_.-]*?(?:password|passwd|pwd|senha|secret|token|api[_-]?key|"
-    r"access[_-]?key|private[_-]?key|client[_-]?secret)(?:[_-]?key)?)(?![A-Za-z0-9])"
+    r"(?i)(?<![A-Za-z0-9])([A-Za-z0-9_.-]*?" + SECRET_KEYWORDS + r")(?![A-Za-z0-9])"
     r"[\"']?\s*[:=]\s*[\"']([^\"'\s]{8,})[\"']"
 )
+# Em arquivo de configuração o valor costuma vir sem aspas (DB_PASSWORD=..., password: ...).
+# A chave ocupa a linha desde o início, então `token_ttl: 3600` e chamadas de função não casam.
+GENERIC_SECRET_UNQUOTED = re.compile(
+    r"(?i)^\s*(?:export\s+)?([A-Za-z0-9_.-]*?" + SECRET_KEYWORDS + r")\s*[:=]\s*"
+    r"([^\s\"'#]{8,})\s*(?:#.*)?$"
+)
+CONFIG_EXT = {".env", ".ini", ".cfg", ".conf", ".properties", ".yml", ".yaml", ".toml"}
 PLACEHOLDER = re.compile(
     r"(?i)(changeme|change[_-]?me|your[_-]|<[^>]+>|\$\{[^}]*\}|%\([^)]*\)s|example|exemplo|dummy|"
     r"fake|placeholder|xxxx|\*\*\*\*|redacted|process\.env|os\.environ|getenv|todo|sample)"
@@ -133,13 +144,43 @@ def rel(root, path):
 
 # ---------------------------------------------------------------- git endurecido
 
+def _inside(path, root):
+    path, root = os.path.realpath(path), os.path.realpath(root)
+    try:
+        return os.path.commonpath([os.path.normcase(path), os.path.normcase(root)]) == os.path.normcase(root)
+    except ValueError:  # unidades diferentes no Windows
+        return False
+
+
+def git_executable(root):
+    """Caminho absoluto do git pelo PATH, recusando entrada relativa e qualquer executável dentro
+    da raiz auditada: no Windows a busca padrão começa pela pasta atual, e um `git.exe` plantado
+    no repositório rodaria no lugar do verdadeiro."""
+    names = ["git"]
+    if os.name == "nt":
+        exts = [e for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep) if e]
+        names = ["git" + e.lower() for e in exts]
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        if not folder or not os.path.isabs(folder) or _inside(folder, root):
+            continue
+        for name in names:
+            candidate = os.path.join(folder, name)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK) and not _inside(candidate, root):
+                return candidate
+    raise RuntimeError("git não encontrado no PATH fora da raiz auditada")
+
+
 def git(root, *args, timeout=60):
     """Roda git sem nada que a configuração do repositório possa transformar em execução."""
     cmd = [
-        "git", "-c", "core.fsmonitor=", "-c", "safe.bareRepository=explicit",
-        "-c", "core.quotePath=false", "-c", "diff.external=", "--no-pager",
+        git_executable(root), "-c", "core.fsmonitor=", "-c", "safe.bareRepository=explicit",
+        "-c", "core.quotePath=false", "-c", "diff.external=", "-c", "protocol.allow=never",
+        "--no-pager",
     ] + list(args)
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_PAGER="cat")
+    # GIT_NO_LAZY_FETCH: num partial clone, objeto ausente dispararia um fetch pelo remote do
+    # repositório — e com ele o core.sshCommand ou o helper que o repositório configurar.
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0", GIT_PAGER="cat",
+               GIT_NO_LAZY_FETCH="1")
     result = subprocess.run(cmd, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             timeout=timeout, env=env)
     if result.returncode != 0:
@@ -182,8 +223,19 @@ def classify_example(value):
     return None
 
 
-def scan_secrets(text, arquivo, generic, hits, generic_count):
-    for number, line in enumerate(text.splitlines(), 1):
+def generic_value_skipped(value):
+    return bool(PLACEHOLDER.search(value) or re.fullmatch(r"[a-z_.]+", value) or value.isdigit()
+                or value.startswith(("$", "ENC[")))
+
+
+def is_config(name, ext):
+    return ext in CONFIG_EXT or name == ".env" or name.startswith(".env.")
+
+
+def scan_secrets(text, arquivo, generic, hits, generic_count, config=False):
+    # split("\n"), não splitlines(): este quebra também em \x0c, \x85 e U+2028, e a linha informada
+    # deixaria de bater com a que o Read mostra.
+    for number, line in enumerate(text.split("\n"), 1):
         if len(line) > 4000:
             line = line[:4000]
         found_specific = False
@@ -204,9 +256,12 @@ def scan_secrets(text, arquivo, generic, hits, generic_count):
                              "exemplo": classify_example(value), "deteccao": "formato do provedor"})
                 found_specific = True
         if generic and not found_specific and generic_count[0] < MAX_GENERIC_HITS:
-            for m in GENERIC_SECRET.finditer(line):
+            matches = list(GENERIC_SECRET.finditer(line))
+            if config and not matches:
+                matches = list(GENERIC_SECRET_UNQUOTED.finditer(line))
+            for m in matches:
                 value = m.group(2)
-                if PLACEHOLDER.search(value) or re.fullmatch(r"[a-z_.]+", value):
+                if generic_value_skipped(value):
                     continue
                 hits.append({"arquivo": arquivo, "linha": number, "tipo": "valor atribuído a '%s'" % m.group(1).lower(),
                              "mascara": mask(value, None), "exemplo": None, "deteccao": "atribuição genérica"})
@@ -216,11 +271,16 @@ def scan_secrets(text, arquivo, generic, hits, generic_count):
 # ---------------------------------------------------------------- varredura
 
 def read_text(path):
+    """Só arquivo comum: link simbólico apontaria para fora do repositório (~/.aws/credentials)
+    e dispositivo como /dev/zero não terminaria de ser lido."""
     try:
-        if os.path.getsize(path) > MAX_TEXT_BYTES:
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_TEXT_BYTES:
             return None
         with open(path, "rb") as fh:
-            data = fh.read()
+            data = fh.read(MAX_TEXT_BYTES + 1)
+        if len(data) > MAX_TEXT_BYTES:
+            return None
     except OSError:
         return None
     if b"\0" in data[:8192]:
@@ -245,7 +305,7 @@ def inventory(root, extra_excluded=(), diff_base=None, subdir=None):
     if diff_base and not BASE_REF.match(diff_base):
         raise ValueError("base de diff inválida: use só letras, números, '.', '_', '-' e '/'")
     start = os.path.abspath(os.path.join(root, subdir)) if subdir else root
-    if not start.startswith(root) or not os.path.isdir(start):
+    if not _inside(start, root) or not os.path.isdir(start):
         raise ValueError("subdiretório fora da raiz ou inexistente: %s" % subdir)
 
     excluded = EXCLUDED_DIRS | set(extra_excluded)
@@ -253,7 +313,7 @@ def inventory(root, extra_excluded=(), diff_base=None, subdir=None):
     elegiveis = []
     por_linguagem = {}
     manifestos, lockfiles, dockerfiles, compose, k8s, iac, ci = [], [], [], [], [], [], []
-    agente, unicode_oculto, segredos = [], [], []
+    agente, unicode_oculto, segredos, links = [], [], [], []
     generic_count = [0]
     c_cpp = 0
 
@@ -262,12 +322,17 @@ def inventory(root, extra_excluded=(), diff_base=None, subdir=None):
         for d in sorted(dirnames):
             if d in excluded:
                 excluded_found.add(rel(root, os.path.join(dirpath, d)))
+            elif os.path.islink(os.path.join(dirpath, d)):
+                links.append(rel(root, os.path.join(dirpath, d)))  # os.walk não entra, mas fica registrado
             else:
                 keep.append(d)
         dirnames[:] = keep
         for name in sorted(filenames):
             path = os.path.join(dirpath, name)
             arquivo = rel(root, path)
+            if os.path.islink(path):
+                links.append(arquivo)
+                continue
             ext = os.path.splitext(name)[1].lower()
             if name in MANIFEST_NAMES or re.match(r"^requirements.*\.txt$", name):
                 manifestos.append(arquivo)
@@ -297,9 +362,10 @@ def inventory(root, extra_excluded=(), diff_base=None, subdir=None):
             if ext in (".yml", ".yaml") and re.search(r"^\s*(apiVersion|kind):", text, re.MULTILINE) \
                     and re.search(r"^\s*kind:\s*\w+", text, re.MULTILINE):
                 k8s.append(arquivo)
-            scan_secrets(text, arquivo, generic=ext not in DOC_EXT, hits=segredos, generic_count=generic_count)
+            scan_secrets(text, arquivo, generic=ext not in DOC_EXT, hits=segredos, generic_count=generic_count,
+                         config=is_config(name, ext))
             if arquivo in agente:
-                linhas = [n for n, l in enumerate(text.splitlines(), 1) if HIDDEN_UNICODE.search(l)]
+                linhas = [n for n, l in enumerate(text.split("\n"), 1) if HIDDEN_UNICODE.search(l)]
                 if linhas:
                     unicode_oculto.append({"arquivo": arquivo, "linhas": linhas[:50], "total": len(linhas)})
 
@@ -313,8 +379,9 @@ def inventory(root, extra_excluded=(), diff_base=None, subdir=None):
         escopo.update(tipo="subdiretorio", subdiretorio=rel(root, start))
     if info_git.get("diff"):
         alterados = info_git["diff"].get("alterados")
+        conjunto = set(elegiveis)
         escopo.update(tipo="diff", base=diff_base,
-                      arquivos=[a for a in (alterados or []) if a in set(elegiveis)])
+                      arquivos=[a for a in (alterados or []) if a in conjunto])
     security_audit_versionado = None
     if versionados is not None:
         security_audit_versionado = sorted(v for v in versionados if v.startswith("security-audit/"))
@@ -327,6 +394,9 @@ def inventory(root, extra_excluded=(), diff_base=None, subdir=None):
     ]
     if generic_count[0] >= MAX_GENERIC_HITS:
         limites.append("O teto de ocorrências genéricas foi atingido: há mais candidatos não listados.")
+    if links:
+        limites.append("%d link(s) simbólico(s) em `links_simbolicos` não foram seguidos, lidos nem "
+                       "contados: o destino pode estar fora do repositório." % len(links))
     if info_git.get("erro"):
         limites.append(info_git["erro"])
 
@@ -353,6 +423,7 @@ def inventory(root, extra_excluded=(), diff_base=None, subdir=None):
         "unicode_oculto": unicode_oculto,
         "c_cpp": {"arquivos": c_cpp, "fora_de_escopo": c_cpp > 0},
         "segredos_candidatos": segredos,
+        "links_simbolicos": links,
         "elegiveis": elegiveis,
         "versionados": sorted(versionados) if versionados is not None else None,
         "limites": limites,

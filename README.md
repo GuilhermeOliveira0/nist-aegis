@@ -20,7 +20,7 @@ o controle violado e correlaciona com CWE e OWASP Top 10:2025.
    versionado no git, infraestrutura, pipelines, segredos candidatos já mascarados e configuração
    de agente de IA no repositório.
 2. **Vulnerabilidades em dependências** (`sca_scan.py`): lockfiles casados por pacote e versão
-   exata no OSV, com nota, CWE e KEV da base NVD local.
+   exata na base OSV local, sem rede, com nota, CWE e KEV da base NVD local.
 3. **Reconhecimento**, **cinco caçadores de domínio em paralelo**, **validação de falso
    positivo**, **triagem de severidade** e **relatório** em `security-audit/`, com um JSON ao lado
    para comparar execuções.
@@ -65,9 +65,13 @@ copie a pasta para `~/.claude/skills/nist`. Depois de alterar qualquer arquivo d
 /nist:audit
 /nist:audit src/api
 /nist:audit --diff main
-/nist:audit --offline --fips --relatorio security-audit/auditoria.md
+/nist:audit --fips --relatorio security-audit/auditoria.md
+/nist:audit --online
 /nist:cve
 ```
+
+Por padrão a consulta de vulnerabilidades roda na base OSV local. `--online` consulta a API do
+OSV; `--offline` não consulta nada e entrega só o inventário de dependências.
 
 A auditoria dispara pelo menos nove subagentes: em projeto grande pode levar dezenas de minutos.
 
@@ -76,8 +80,13 @@ A auditoria dispara pelo menos nove subagentes: em projeto grande pode levar dez
 - **Segredos** são procurados por script, e o valor sai mascarado antes de qualquer agente ver o
   resultado. O valor ainda aparece nas leituras de arquivo que ficam no histórico da sessão:
   para garantia total, audite em ambiente descartável.
-- **Dependências**: nome e versão dos pacotes públicos vão para api.osv.dev. Pacote npm de
-  registro privado não é enviado. `--offline` não faz rede nenhuma.
+- **Dependências**: por padrão, nada sai da máquina — a consulta roda na base OSV local. Só com
+  `--online` o nome, o ecossistema e a versão dos pacotes públicos vão para api.osv.dev; mesmo
+  assim não é enviado, em nenhum ecossistema, o que o projeto declara com fonte privada (git, URL,
+  caminho local, índice ou registro próprio, escopo npm do `.npmrc` ou do `.yarnrc.yml`), módulo
+  Go coberto pelo seu `GOPRIVATE`, membro de workspace nem nome que case `--nao-enviar`.
+  Usuário, senha e token de URL de origem são removidos antes de gravar o resultado.
+  `--offline` não faz rede nenhuma.
 - **Relatório**: fica em `security-audit/`, que ganha um `.gitignore` próprio com `*`. Se o seu
   Dockerfile faz `COPY . .`, exclua `security-audit/` no `.dockerignore`.
 
@@ -93,23 +102,55 @@ pasta. Antes de auditar um repositório que não é seu:
    `AGENTS.md` do projeto: hooks, servidores MCP e agentes do projeto passam a valer depois dele.
 3. Prefira rodar a auditoria dentro de um container ou de uma VM.
 
-## Base de CVEs da NVD (opcional)
+## Bases locais
 
-Sem a base, a auditoria roda: o OSV traz as vulnerabilidades, e a base só acrescenta a nota da
-NVD, o CWE e o KEV. Download completo (cerca de 400 mil CVEs e 3 GB; pode passar de uma hora),
-incremental, reprocessamento local e estado:
+As duas bases ficam juntas numa pasta só (`NIST_AEGIS_HOME` troca o lugar):
+
+```
+~/.nist-aegis/
+├── bases/
+│   ├── osv.sqlite     vulnerabilidades por pacote e versão (download_osv.py)
+│   └── nvd.sqlite     nota, CWE e KEV de cada CVE (download_db.py)
+└── downloads/         arquivos do OSV em trânsito, apagados depois da importação
+```
+
+A auditoria nunca baixa nem atualiza uma base por conta própria: ela avisa e mostra o comando.
+
+### OSV (recomendada)
+
+Sem ela, a auditoria roda sem consulta de vulnerabilidade em dependência, a menos que você use
+`--online`. Download de npm, PyPI, Go, Maven, crates.io, Packagist, RubyGems e NuGet (cerca de
+300 MB compactados), com MD5 conferido; a atualização baixa só os registros alterados:
 
 ```bash
-python <pasta-do-plugin>/skills/cve/scripts/download_db.py --db ~/.nvd/nvd.sqlite
-python <pasta-do-plugin>/skills/cve/scripts/download_db.py --db ~/.nvd/nvd.sqlite --update
-python <pasta-do-plugin>/skills/cve/scripts/download_db.py --db ~/.nvd/nvd.sqlite --reindex
-python <pasta-do-plugin>/skills/cve/scripts/local_lookup.py --db ~/.nvd/nvd.sqlite --stats
+python <pasta-do-plugin>/skills/cve/scripts/download_osv.py
+python <pasta-do-plugin>/skills/cve/scripts/download_osv.py --update
+python <pasta-do-plugin>/skills/cve/scripts/download_osv.py --stats
+```
+
+O download é o mesmo arquivo público para qualquer pessoa: não revela o que você audita. A
+comparação de versão segue a regra de cada ecossistema; versão que o comparador não reconhece sai
+como "não avaliada", nunca como "sem vulnerabilidade". Base com mais de 7 dias gera aviso no
+relatório. Os dados do OSV vêm de fontes como GitHub Advisory Database, PyPA, Go e RustSec, cada
+uma com a própria licença (a maioria CC-BY 4.0).
+
+### NVD (opcional)
+
+Sem ela, a base OSV traz as vulnerabilidades, e a NVD só acrescenta a nota da NVD, o CWE e o KEV.
+Download completo (cerca de 400 mil CVEs e 3 GB; pode passar de uma hora), incremental,
+reprocessamento local e estado:
+
+```bash
+python <pasta-do-plugin>/skills/cve/scripts/download_db.py
+python <pasta-do-plugin>/skills/cve/scripts/download_db.py --update
+python <pasta-do-plugin>/skills/cve/scripts/download_db.py --reindex
+python <pasta-do-plugin>/skills/cve/scripts/local_lookup.py --stats
 ```
 
 O download grava checkpoint a cada página: interrompido ou com erro da API, rode o mesmo comando
 de novo e ele retoma. Uma base criada pela versão 1.0.0 ganha CVSS 4.0, KEV e as faixas de
-versão completas com `--reindex`, sem rede. A auditoria nunca baixa nem atualiza a base por
-conta própria.
+versão completas com `--reindex`, sem rede. Uma base em `~/.nvd/nvd.sqlite`, de versões
+anteriores, continua sendo usada até você movê-la para `~/.nist-aegis/bases/`.
 
 A chave `NVD_API_KEY` é lida da variável de ambiente, nunca gravada em arquivo. Sem chave o rate
 limit da NVD é 5 requisições por 30 s; com chave, 50.

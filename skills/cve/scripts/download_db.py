@@ -2,9 +2,9 @@
 """Baixa a base de CVEs da NVD para um SQLite local, com retomada por checkpoint.
 
 Uso:
-    python download_db.py --db ~/.nvd/nvd.sqlite            # download completo
-    python download_db.py --db ~/.nvd/nvd.sqlite --update   # incremental
-    python download_db.py --db ~/.nvd/nvd.sqlite --reindex  # reprocessa o JSON já gravado
+    python download_db.py            # download completo
+    python download_db.py --update   # incremental
+    python download_db.py --reindex  # reprocessa o JSON já gravado
 
 O download completo é paginado de 2000 em 2000. Cada página é gravada e o índice registrado
 em `meta.checkpoint_index`, então um comando interrompido por timeout, queda de rede ou erro
@@ -30,6 +30,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bases  # noqa: E402
 from nvd_common import (  # noqa: E402
     DATA_VERSION,
     EXIT_ERROR,
@@ -205,7 +206,8 @@ def reindex(conn, batch=2000):
 
 def build_parser():
     parser = argparse.ArgumentParser(description="Baixa a base de CVEs da NVD para SQLite.")
-    parser.add_argument("--db", required=True, help="caminho do arquivo SQLite")
+    parser.add_argument("--db", help="caminho do arquivo SQLite (padrão: ~/.nist-aegis/bases/nvd.sqlite, "
+                        "ou ~/.nvd/nvd.sqlite de versões anteriores, quando existir)")
     modo = parser.add_mutually_exclusive_group()
     modo.add_argument("--update", action="store_true", help="sincronização incremental")
     modo.add_argument("--reindex", action="store_true",
@@ -221,6 +223,7 @@ def build_parser():
 def main(argv=None):
     configure_stdio()
     args = build_parser().parse_args(argv)
+    args.db = bases.resolve_nvd(args.db)
     resolved = db_path(args.db)
     existed = os.path.exists(resolved)
 

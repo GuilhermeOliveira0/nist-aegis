@@ -11,6 +11,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(RAIZ, "skills", "cve", "scripts"))
@@ -319,6 +320,142 @@ class TestScan(unittest.TestCase):
         self.assertIn("desligada", resultado["consulta"]["fonte"])
         self.assertEqual(resultado["inventario"]["por_ecossistema"], {"npm": 6})
         self.assertEqual(resultado["sem_lockfile"], [])
+
+
+# Tokens falsos montados por concatenação, como no test_inventario.py.
+TOKEN_FALSO = "ghp_" + "Zx9Kq2" * 6
+SENHA_FALSA = "Pw7" + "rTq4Ln8Vx"
+
+
+class _OsvGravador(_OsvFalso):
+    """Guarda o corpo inteiro de cada consulta, para conferir o que sairia da máquina."""
+
+    def __init__(self):
+        super().__init__({}, {})
+        self.corpos = []
+
+    def __call__(self, url, body=None, **kw):
+        if body is not None:
+            self.corpos.append(json.loads(json.dumps(body)))
+        return super().__call__(url, body, **kw)
+
+
+class TestPrivacidade(ProjetoTemporario):
+    def setUp(self):
+        super().setUp()
+        self.orig = sca_scan.http_json
+        self.gravador = _OsvGravador()
+        sca_scan.http_json = self.gravador
+
+    def tearDown(self):
+        sca_scan.http_json = self.orig
+        super().tearDown()
+
+    def montar_projeto(self):
+        lock = {"lockfileVersion": 3, "packages": {
+            "": {"dependencies": {"express": "4.18.2"}},
+            "node_modules/express": {"version": "4.18.2",
+                                     "resolved": "https://registry.npmjs.org/express/-/express-4.18.2.tgz"},
+            "packages/app-interno": {"name": "@empresa/app-interno", "version": "1.0.0"},
+            "packages/app-interno/node_modules/lodash": {"version": "4.17.21"},
+            "node_modules/@empresa/sdk": {"version": "2.0.0",
+                                          "resolved": "https://registry.npmjs.org/@empresa/sdk/-/sdk-2.0.0.tgz"},
+            "node_modules/via-git": {"version": "git+https://%s@github.com/empresa/via-git.git#abc" % TOKEN_FALSO},
+        }}
+        escrever(self.raiz, "package-lock.json", json.dumps(lock))
+        escrever(self.raiz, ".npmrc", "@empresa:registry=https://npm.empresa.interna/\n")
+        escrever(self.raiz, "web/yarn.lock", '# yarn lockfile v1\n\nleft-pad@^1.0.0:\n  version "1.3.0"\n'
+                 '  resolved "https://npm.empresa.interna/left-pad-1.3.0.tgz"\n\nqs@^6.0.0:\n  version "6.11.0"\n'
+                 '  resolved "https://registry.yarnpkg.com/qs/-/qs-6.11.0.tgz"\n')
+        escrever(self.raiz, "front/pnpm-lock.yaml", "lockfileVersion: '9.0'\n\npackages:\n\n"
+                 "  ui-privado@3.1.0:\n    resolution: {integrity: sha512-x, tarball: https://npm.empresa.interna/ui-privado-3.1.0.tgz}\n\n"
+                 "  react@18.2.0:\n    resolution: {integrity: sha512-y}\n")
+        escrever(self.raiz, "py/poetry.lock",
+                 '[[package]]\nname = "requests"\nversion = "2.31.0"\n\n'
+                 '[[package]]\nname = "cobranca-interna"\nversion = "0.3.0"\n\n[package.source]\ntype = "legacy"\n'
+                 'url = "https://pypi.empresa.interna/simple"\nreference = "empresa"\n\n'
+                 '[[package]]\nname = "lib-local"\nversion = "0.1.0"\n\n[package.source]\ntype = "directory"\nurl = "../lib"\n')
+        escrever(self.raiz, "svc/go.mod", "module github.com/empresa/svc\n\ngo 1.22\n\nrequire (\n"
+                 "\tgithub.com/gin-gonic/gin v1.9.1\n\tgithub.com/empresa/segredo-interno v0.4.0\n)\n")
+        escrever(self.raiz, "rs/Cargo.lock", '[[package]]\nname = "fork-interno"\nversion = "0.2.0"\n'
+                 'source = "git+https://%s@git.empresa.interna/fork.git#abc"\n' % TOKEN_FALSO)
+
+    def test_consulta_leva_so_nome_ecossistema_e_versao_e_nada_privado(self):
+        self.montar_projeto()
+        with mock.patch.dict(os.environ, {"GOPRIVATE": "github.com/empresa/*"}):
+            resultado = sca_scan.scan(self.raiz)
+        consultas = [q for corpo in self.gravador.corpos for q in corpo["queries"]]
+        self.assertTrue(consultas)
+        for q in consultas:
+            self.assertEqual(set(q), {"package", "version"})
+            self.assertEqual(set(q["package"]), {"name", "ecosystem"})
+        enviados = {q["package"]["name"] for q in consultas}
+        self.assertTrue({"express", "qs", "react", "requests", "github.com/gin-gonic/gin"} <= enviados, enviados)
+        privados = {"@empresa/app-interno", "@empresa/sdk", "via-git", "left-pad", "ui-privado",
+                    "cobranca-interna", "lib-local", "github.com/empresa/segredo-interno", "fork-interno"}
+        self.assertFalse(privados & enviados, privados & enviados)
+        corpo_bruto = json.dumps(self.gravador.corpos)
+        self.assertNotIn(TOKEN_FALSO, corpo_bruto)
+        self.assertNotIn("empresa.interna", corpo_bruto)
+        motivos = {n["nome"]: n["motivo"] for n in resultado["consulta"]["nao_enviados"]}
+        self.assertIn("escopo npm", motivos["@empresa/sdk"])
+        self.assertIn("GOPRIVATE", motivos["github.com/empresa/segredo-interno"])
+
+    def test_credencial_de_url_nao_vai_para_o_json(self):
+        self.montar_projeto()
+        escrever(self.raiz, "rb/Gemfile.lock", "GIT\n  remote: https://deploy:%s@git.empresa.interna/gem.git\n"
+                 "  revision: abc\n  specs:\n    gem-interna (1.0.0)\n\nGEM\n  remote: https://rubygems.org/\n"
+                 "  specs:\n    rack (2.2.8)\n\nDEPENDENCIES\n  rack\n" % SENHA_FALSA)
+        with open(os.path.join(self.raiz, "package-lock.json"), encoding="utf-8") as fh:
+            lock = json.load(fh)
+        lock["packages"]["node_modules/express"]["resolved"] = "https://u:%s@registry.npmjs.org/express.tgz" % SENHA_FALSA
+        escrever(self.raiz, "package-lock.json", json.dumps(lock))
+        texto = json.dumps(sca_scan.scan(self.raiz, offline=True), ensure_ascii=False)
+        self.assertNotIn(TOKEN_FALSO, texto)
+        self.assertNotIn(SENHA_FALSA, texto)
+        self.assertIn("<credencial removida>@", texto)
+
+    def test_sem_credencial(self):
+        self.assertEqual(sca_scan.sem_credencial("https://%s@github.com/o/r" % TOKEN_FALSO),
+                         "https://<credencial removida>@github.com/o/r")
+        self.assertEqual(sca_scan.sem_credencial("git+ssh://git@github.com/o/r.git"), "git+ssh://git@github.com/o/r.git")
+        self.assertEqual(sca_scan.sem_credencial("https://registry.npmjs.org/x.tgz"), "https://registry.npmjs.org/x.tgz")
+        self.assertIsNone(sca_scan.sem_credencial(None))
+
+
+class TestRobustez(ProjetoTemporario):
+    def test_lockfile_malformado_vira_erro_e_o_scan_continua(self):
+        escrever(self.raiz, "bom/package-lock.json", json.dumps(
+            {"lockfileVersion": 3, "packages": {"": {}, "node_modules/qs": {"version": "6.11.0"}}}))
+        escrever(self.raiz, "a/package-lock.json", json.dumps({"lockfileVersion": 3, "packages": {"node_modules/x": "1.0"}}))
+        escrever(self.raiz, "b/package-lock.json", json.dumps({"lockfileVersion": 3, "packages": [1]}))
+        escrever(self.raiz, "c/Pipfile.lock", json.dumps({"default": {"flask": "2.0.1"}}))
+        escrever(self.raiz, "d/composer.lock", json.dumps({"packages": ["x"]}))
+        escrever(self.raiz, "e/packages.lock.json", json.dumps({"dependencies": {"net6.0": {"X": "1.0"}}}))
+        escrever(self.raiz, "f/Cargo.lock", '[[package]]\nname = "x"\nversion = "1.0.0"\nsource = 1\n')
+        escrever(self.raiz, "g/poetry.lock", 'package = ["x"]\n')
+        escrever(self.raiz, "h/package-lock.json", "[" * 100000 + "]" * 100000)
+        escrever(self.raiz, "i/package-lock.json", json.dumps(
+            {"lockfileVersion": 3, "packages": {"": {}, "node_modules/y": {"version": ["1.0.0"]}}}))
+        resultado = sca_scan.scan(self.raiz, offline=True)
+        self.assertEqual(resultado["inventario"]["total"], 1)  # só o qs do lockfile bom
+        falhos = {e.split(":", 1)[0] for e in resultado["erros"]}
+        esperados = {"a/package-lock.json", "b/package-lock.json", "c/Pipfile.lock", "d/composer.lock",
+                     "e/packages.lock.json", "f/Cargo.lock", "g/poetry.lock", "h/package-lock.json",
+                     "i/package-lock.json"}
+        self.assertEqual(falhos, esperados)
+
+    def test_link_simbolico_nao_e_lido(self):
+        fora = tempfile.mkdtemp(prefix="nist-fora-")
+        self.addCleanup(shutil.rmtree, fora, True)
+        alvo = escrever(fora, "credentials", "aws_secret_access_key = " + SENHA_FALSA + "\n")
+        try:
+            os.symlink(alvo, os.path.join(self.raiz, "requirements.txt"))
+        except (OSError, NotImplementedError):
+            self.skipTest("este ambiente não permite criar link simbólico")
+        resultado = sca_scan.scan(self.raiz, offline=True)
+        self.assertNotIn(SENHA_FALSA, json.dumps(resultado))
+        self.assertTrue(any("link simbólico" in e for e in resultado["erros"]))
 
 
 if __name__ == "__main__":
