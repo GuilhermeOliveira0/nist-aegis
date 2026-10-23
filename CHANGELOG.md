@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.2 — 2026-10-14
+
+- `download_db.py --update` completa mesmo quando a NVD encurta a paginação. A API pagina sobre
+  dados vivos: CVE alterado durante o download sai da janela, desloca os índices e deixa a última
+  página curta, e o sync parava com erro sem avançar. Agora a janela encurtada é relida até três
+  vezes, o que pega os registros que escorregaram de página; os que saíram da janela foram
+  alterados depois do início e entram no próximo `--update`. O download completo continua estrito.
+- Resposta cortada no meio (`IncompleteRead`) e erro de SSL viram nova tentativa em vez de
+  traceback, na NVD, no `download_osv.py` e no `sca_scan.py`.
+- 4 testes novos (109 no total).
+
 ## 1.2.1 — 2026-09-29
 
 - Base OSV local: aviso com ecossistema `Packagist:<repositório>` entra como Packagist. O OSV

@@ -24,6 +24,7 @@ import argparse
 import base64
 import email.utils
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -115,7 +116,7 @@ def baixar_arquivo(url, destino, progresso=None):
                 lido += len(bloco)
                 if progresso:
                     progresso(lido, tamanho)
-    except (OSError, urllib.error.URLError) as exc:
+    except (OSError, http.client.HTTPException) as exc:  # inclui resposta cortada no meio
         _apagar(parcial)
         raise DownloadErro("download interrompido: %s" % type(exc).__name__)
     finally:
@@ -140,6 +141,8 @@ def baixar_texto(url, limite=64 * 1024 * 1024):
     resp = _abrir(url)
     try:
         dados = resp.read(limite + 1)
+    except (OSError, http.client.HTTPException) as exc:
+        raise DownloadErro("leitura interrompida em %s: %s" % (url, type(exc).__name__))
     finally:
         resp.close()
     if len(dados) > limite:

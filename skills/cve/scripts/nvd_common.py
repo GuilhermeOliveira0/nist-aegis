@@ -5,6 +5,7 @@ apenas como header da requisição.
 """
 
 import argparse
+import http.client
 import json
 import os
 import pathlib
@@ -239,7 +240,9 @@ def request_json(params, key, timeout=90, max_retries=6):
             raise NvdRequestError(
                 "a NVD respondeu HTTP %d%s" % (exc.code, (": " + detalhe) if detalhe else "")
             )
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+        except (OSError, http.client.HTTPException) as exc:
+            # OSError cobre URLError, timeout, conexão recusada e SSL; HTTPException cobre a
+            # resposta cortada no meio (IncompleteRead), comum nas páginas de 16 MB da NVD.
             if attempt < max_retries:
                 sys.stderr.write(
                     "  rede: %s, tentativa %d/%d, aguardando %.0fs\n"

@@ -443,6 +443,66 @@ class TestDownload(unittest.TestCase):
             download_db.full_download(self.conn, None, True)
         self.assertNotEqual(nvd_common.meta_get(self.conn, "complete"), "1")
 
+    def _base_sincronizada(self):
+        nvd_common.meta_set(self.conn, "last_sync", "2026-10-01T00:00:00.000Z")
+        nvd_common.meta_set(self.conn, "complete", "1")
+        self.conn.commit()
+        download_db.now_utc = lambda: datetime(2026, 10, 14, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_incremental_encurtado_rele_a_janela(self):
+        """A NVD pagina sobre dados vivos: janela que encurta é relida, e o sync se completa."""
+        self._base_sincronizada()
+        paginas = _Paginas([_pagina([WS, LOG4SHELL], 5), _pagina([SO_V4], 5),   # 1ª passada, curta
+                            _pagina([WS, LOG4SHELL], 3), _pagina([SO_V4], 3)])  # 2ª passada, completa
+        download_db.request_json = paginas
+        download_db.incremental(self.conn, None, True)
+        self.assertEqual(len(paginas.chamadas), 4)
+        self.assertEqual(paginas.chamadas[2]["startIndex"], 0)
+        self.assertEqual(nvd_common.meta_get(self.conn, "last_sync"), "2026-10-14T12:00:00.000Z")
+
+    def test_incremental_aceita_depois_das_passadas(self):
+        self._base_sincronizada()
+        curta = [_pagina([WS, LOG4SHELL], 5), _pagina([SO_V4], 5)]
+        download_db.request_json = _Paginas(curta * download_db.PASSADAS_INCREMENTAL)
+        download_db.incremental(self.conn, None, True)
+        self.assertEqual(nvd_common.meta_get(self.conn, "last_sync"), "2026-10-14T12:00:00.000Z")
+
+    def test_erro_de_rede_no_incremental_nao_avanca_o_sync(self):
+        self._base_sincronizada()
+        download_db.request_json = _Paginas([_pagina([WS, LOG4SHELL], 5),
+                                             nvd_common.NvdRequestError("HTTP 503")])
+        with self.assertRaises(nvd_common.NvdRequestError):
+            download_db.incremental(self.conn, None, True)
+        self.assertEqual(nvd_common.meta_get(self.conn, "last_sync"), "2026-10-01T00:00:00.000Z")
+
+    def test_resposta_cortada_e_tentada_de_novo(self):
+        """IncompleteRead (conexão caída no meio da página) é falha de rede, não traceback."""
+        import http.client
+
+        class _Resp:
+            def __init__(self, corpo, cortar):
+                self.corpo, self.cortar = corpo, cortar
+
+            def read(self):
+                if self.cortar:
+                    raise http.client.IncompleteRead(b"{", 100)
+                return self.corpo
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        respostas = [_Resp(b"", True), _Resp(b'{"totalResults": 0}', False)]
+        orig = (nvd_common.urllib.request.urlopen, nvd_common.time.sleep)
+        nvd_common.urllib.request.urlopen = lambda *a, **kw: respostas.pop(0)
+        nvd_common.time.sleep = lambda s: None
+        try:
+            self.assertEqual(nvd_common.request_json({}, None), {"totalResults": 0})
+        finally:
+            nvd_common.urllib.request.urlopen, nvd_common.time.sleep = orig
+
     def test_last_sync_e_a_hora_de_inicio(self):
         inicio = datetime(2026, 9, 28, 10, 0, 0, tzinfo=timezone.utc)
         fim = datetime(2026, 9, 28, 11, 30, 0, tzinfo=timezone.utc)

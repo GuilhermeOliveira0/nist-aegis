@@ -33,6 +33,7 @@ fica registrada no JSON), 2 argumento inválido, 3 erro de execução.
 import argparse
 import concurrent.futures
 import fnmatch
+import http.client
 import json
 import math
 import os
@@ -667,7 +668,7 @@ def http_json(url, body=None, timeout=60, retries=4):
                 delay *= 2
                 continue
             raise ScanError("OSV respondeu HTTP %d" % exc.code)
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+        except (OSError, http.client.HTTPException) as exc:  # inclui SSL e resposta cortada
             if attempt < retries:
                 time.sleep(delay)
                 delay *= 2

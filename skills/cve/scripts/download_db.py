@@ -51,6 +51,7 @@ from nvd_common import (  # noqa: E402
 )
 
 MAX_WINDOW_DAYS = 120  # limite da NVD para lastModStartDate/lastModEndDate
+PASSADAS_INCREMENTAL = 3  # releituras de uma janela incremental que a NVD encurtou
 STAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.000Z"
 
 
@@ -74,11 +75,16 @@ def store_page(conn, payload, store_raw):
     return written
 
 
+class PaginacaoEncurtada(NvdRequestError):
+    """A NVD entregou menos registros que o total anunciado."""
+
+
 def run_pages(conn, base_params, key, store_raw, label, resume_index=0):
     """Pagina uma consulta inteira, gravando checkpoint a cada página.
 
-    Página vazia ou curta antes do total é erro: a paginação da NVD só encurta na última
-    página. O checkpoint fica gravado e reexecutar o comando retoma dali.
+    Página vazia ou curta antes do total levanta PaginacaoEncurtada: no download completo é
+    erro (o checkpoint fica gravado e reexecutar o comando retoma dali); no incremental,
+    `incremental` sabe tratar.
     """
     sleep_for = SLEEP_WITH_KEY if key else SLEEP_NO_KEY
     start = resume_index
@@ -104,7 +110,7 @@ def run_pages(conn, base_params, key, store_raw, label, resume_index=0):
         if start >= total:
             break
         if got < PAGE_SIZE:
-            raise NvdRequestError(
+            raise PaginacaoEncurtada(
                 "a NVD devolveu %d registro(s) no índice %d, antes do fim (%d de %d): a paginação "
                 "parou no meio; rode o mesmo comando para retomar do checkpoint"
                 % (got, start - got, start, total)
@@ -151,13 +157,23 @@ def incremental(conn, key, store_raw):
     while start < end:
         chunk_end = min(start + timedelta(days=MAX_WINDOW_DAYS), end)
         window += 1
-        written += run_pages(
-            conn,
-            {"lastModStartDate": stamp(start), "lastModEndDate": stamp(chunk_end)},
-            key,
-            store_raw,
-            "janela %d" % window,
-        )
+        params = {"lastModStartDate": stamp(start), "lastModEndDate": stamp(chunk_end)}
+        # A NVD pagina sobre dados vivos. CVE alterado durante a paginação sai da janela (o
+        # lastModified novo passa de `end`) e entra no próximo --update; mas a saída desloca os
+        # índices, e um registro inalterado pode escorregar para uma página já lida. Por isso a
+        # janela encurtada é relida: cada passada pega o que a anterior deixou escorregar.
+        for passada in range(1, PASSADAS_INCREMENTAL + 1):
+            try:
+                written += run_pages(conn, params, key, store_raw, "janela %d" % window)
+                break
+            except PaginacaoEncurtada as exc:
+                if passada == PASSADAS_INCREMENTAL:
+                    print("aviso: janela %d terminou curta em %d passadas (%s); os CVEs que saíram "
+                          "da janela foram alterados depois de %s e entram no próximo --update"
+                          % (window, passada, exc, stamp(end)), flush=True)
+                else:
+                    print("janela %d encurtou durante a paginação; relendo (passada %d de %d)"
+                          % (window, passada + 1, PASSADAS_INCREMENTAL), flush=True)
         start = chunk_end
     meta_set(conn, "last_sync", stamp(end))
     # run_pages grava checkpoint a cada página, mas no incremental ele não serve para retomada:
