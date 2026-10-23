@@ -36,6 +36,7 @@ from nvd_common import (  # noqa: E402
     EXIT_ERROR,
     EXIT_OK,
     PAGE_SIZE,
+    positive_int,
     SLEEP_NO_KEY,
     SLEEP_WITH_KEY,
     NvdRequestError,
@@ -79,31 +80,42 @@ class PaginacaoEncurtada(NvdRequestError):
     """A NVD entregou menos registros que o total anunciado."""
 
 
-def run_pages(conn, base_params, key, store_raw, label, resume_index=0):
+def _sleep_for(key):
+    return SLEEP_WITH_KEY if key else SLEEP_NO_KEY
+
+
+def run_pages(conn, base_params, key, store_raw, label, resume_index=0, marcas=None, salvar=None):
     """Pagina uma consulta inteira, gravando checkpoint a cada página.
 
-    Página vazia ou curta antes do total levanta PaginacaoEncurtada: no download completo é
-    erro (o checkpoint fica gravado e reexecutar o comando retoma dali); no incremental,
-    `incremental` sabe tratar.
+    O fim é o total que a NVD informa na resposta mais recente, não o da primeira: numa janela
+    incremental o total cai quando um CVE é alterado durante a paginação. Página curta antes
+    desse total levanta PaginacaoEncurtada — o checkpoint fica gravado e reexecutar retoma.
+
+    `marcas` recebe, por página, [índice antes da página, total informado na resposta]: é o que
+    `reler_deslocados` usa para achar onde a lista mudou. `salvar(indice)` persiste a retomada.
     """
-    sleep_for = SLEEP_WITH_KEY if key else SLEEP_NO_KEY
     start = resume_index
-    total = None
+    anunciado = None
     written = 0
     while True:
         params = dict(base_params)
         params["resultsPerPage"] = PAGE_SIZE
         params["startIndex"] = start
         payload = request_json(params, key)
-        if total is None:
-            total = int(payload.get("totalResults", 0) or 0)
+        total = int(payload.get("totalResults", 0) or 0)
+        if anunciado is None:
+            anunciado = total
             print("%s: %d CVEs a processar" % (label, total), flush=True)
+        if marcas is not None:
+            marcas.append([start, total])
         items = payload.get("vulnerabilities") or []
         got = len(items)
         written += store_page(conn, payload, store_raw)
         start += got
         meta_set(conn, "checkpoint_index", start)
         meta_set(conn, "checkpoint_total", total)
+        if salvar:
+            salvar(start)
         conn.commit()
         pct = (min(start, total) / total * 100) if total else 100.0
         print("  %s  %d/%d (%.1f%%)" % (label, min(start, total), total, pct), flush=True)
@@ -115,7 +127,66 @@ def run_pages(conn, base_params, key, store_raw, label, resume_index=0):
                 "parou no meio; rode o mesmo comando para retomar do checkpoint"
                 % (got, start - got, start, total)
             )
-        time.sleep(sleep_for)
+        time.sleep(_sleep_for(key))
+    return written
+
+
+def faixas_deslocadas(marcas, total_final):
+    """Faixas de índice, na lista atual, onde pode estar um CVE que escorregou para uma página
+    já lida.
+
+    Numa janela incremental a lista só perde itens: o CVE alterado durante a paginação ganha
+    lastModified depois do fim da janela. Cada saída antes de um item o desloca uma posição para
+    trás. Um item escapa da leitura quando cruza a fronteira `c` da próxima página entre duas
+    requisições — e a queda do total entre elas limita o quanto ele andou. Depois disso ele ainda
+    recua no máximo o que o total caiu até `total_final`. Logo, na lista atual, ele está em
+    [c - (total da página anterior - total_final), c).
+    """
+    faixas = []
+    for (_, anterior), (c, atual) in zip(marcas, marcas[1:]):
+        if c > 0 and anterior > atual:
+            faixas.append([max(0, c - (anterior - total_final)), c])
+    faixas.sort()
+    juntas = []
+    for lo, hi in faixas:
+        if juntas and lo <= juntas[-1][1]:
+            juntas[-1][1] = max(juntas[-1][1], hi)
+        else:
+            juntas.append([lo, hi])
+    return juntas
+
+
+def reler_deslocados(conn, base_params, key, store_raw, label, marcas):
+    """Relê só as faixas onde a lista mudou, em vez da janela inteira. Saída nova durante a
+    releitura alarga as faixas, e a releitura se repete, até PASSADAS_INCREMENTAL vezes."""
+    if not marcas:
+        return 0
+    total_final = marcas[-1][1]
+    written = 0
+    for _ in range(PASSADAS_INCREMENTAL):
+        faixas = faixas_deslocadas(marcas, total_final)
+        if not faixas:
+            return written
+        quantos = sum(hi - lo for lo, hi in faixas)
+        print("%s: a lista mudou durante a paginação; relendo %d posição(ões) em %d faixa(s)"
+              % (label, quantos, len(faixas)), flush=True)
+        menor = total_final
+        for lo, hi in faixas:
+            pos = lo
+            while pos < hi:
+                tamanho = min(PAGE_SIZE, hi - pos)
+                params = dict(base_params, resultsPerPage=tamanho, startIndex=pos)
+                payload = request_json(params, key)
+                written += store_page(conn, payload, store_raw)
+                menor = min(menor, int(payload.get("totalResults", menor) or 0))
+                pos += tamanho
+                time.sleep(_sleep_for(key))
+        conn.commit()
+        if menor >= total_final:
+            return written
+        total_final = menor  # mais saídas durante a releitura: as faixas crescem
+    print("aviso: %s mudou de novo durante a releitura; os CVEs que saíram dela foram alterados "
+          "depois do fim da janela e entram no próximo --update" % label, flush=True)
     return written
 
 
@@ -146,38 +217,63 @@ def full_download(conn, key, store_raw):
     return written
 
 
+INC_KEYS = ("inc_fim", "inc_inicio", "inc_indice", "inc_marcas")
+
+
 def incremental(conn, key, store_raw):
+    """Sincroniza o que mudou desde o last_sync, em janelas de até MAX_WINDOW_DAYS.
+
+    A NVD pagina sobre dados vivos: CVE alterado durante a paginação sai da janela (o
+    lastModified novo passa do fim dela) e entra no próximo --update, mas a saída desloca os
+    índices e pode fazer um CVE inalterado escorregar para uma página já lida. Esses são
+    recuperados por `reler_deslocados`, que relê só as faixas onde o total caiu.
+
+    Interrompido (rede, Ctrl+C, computador em suspensão), o estado fica em meta.inc_*: a próxima
+    execução retoma a mesma janela e o mesmo índice, com o mesmo fim, e a queda do total durante
+    a pausa entra nas marcas como qualquer outra.
+    """
     last = meta_get(conn, "last_sync")
     if not last:
         raise NvdRequestError("base sem last_sync: rode o download completo antes do --update")
-    start = parse_stamp(last)
-    end = now_utc()
+    if meta_get(conn, "inc_fim"):
+        end = parse_stamp(meta_get(conn, "inc_fim"))
+        start = parse_stamp(meta_get(conn, "inc_inicio"))
+        indice = int(meta_get(conn, "inc_indice", "0") or 0)
+        marcas = json.loads(meta_get(conn, "inc_marcas", "[]") or "[]")
+        print("retomando a atualização interrompida: janela a partir de %s, índice %d"
+              % (stamp(start), indice), flush=True)
+    else:
+        start, end, indice, marcas = parse_stamp(last), now_utc(), 0, []
+        meta_set(conn, "inc_fim", stamp(end))
+        meta_set(conn, "inc_inicio", stamp(start))
+        meta_set(conn, "inc_indice", 0)
+        meta_set(conn, "inc_marcas", "[]")
+        conn.commit()
     written = 0
     window = 0
     while start < end:
         chunk_end = min(start + timedelta(days=MAX_WINDOW_DAYS), end)
         window += 1
+        label = "janela %d" % window
         params = {"lastModStartDate": stamp(start), "lastModEndDate": stamp(chunk_end)}
-        # A NVD pagina sobre dados vivos. CVE alterado durante a paginação sai da janela (o
-        # lastModified novo passa de `end`) e entra no próximo --update; mas a saída desloca os
-        # índices, e um registro inalterado pode escorregar para uma página já lida. Por isso a
-        # janela encurtada é relida: cada passada pega o que a anterior deixou escorregar.
-        for passada in range(1, PASSADAS_INCREMENTAL + 1):
-            try:
-                written += run_pages(conn, params, key, store_raw, "janela %d" % window)
-                break
-            except PaginacaoEncurtada as exc:
-                if passada == PASSADAS_INCREMENTAL:
-                    print("aviso: janela %d terminou curta em %d passadas (%s); os CVEs que saíram "
-                          "da janela foram alterados depois de %s e entram no próximo --update"
-                          % (window, passada, exc, stamp(end)), flush=True)
-                else:
-                    print("janela %d encurtou durante a paginação; relendo (passada %d de %d)"
-                          % (window, passada + 1, PASSADAS_INCREMENTAL), flush=True)
-        start = chunk_end
+
+        def salvar(pos, marcas=marcas):
+            meta_set(conn, "inc_indice", pos)
+            meta_set(conn, "inc_marcas", json.dumps(marcas))
+
+        written += run_pages(conn, params, key, store_raw, label, resume_index=indice,
+                             marcas=marcas, salvar=salvar)
+        written += reler_deslocados(conn, params, key, store_raw, label, marcas)
+        start, indice, marcas = chunk_end, 0, []
+        meta_set(conn, "inc_inicio", stamp(start))
+        meta_set(conn, "inc_indice", 0)
+        meta_set(conn, "inc_marcas", "[]")
+        conn.commit()
     meta_set(conn, "last_sync", stamp(end))
-    # run_pages grava checkpoint a cada página, mas no incremental ele não serve para retomada:
-    # o ponto de retomada é o last_sync. Zerar evita "download pendente" fantasma no --stats.
+    for chave in INC_KEYS:
+        meta_set(conn, chave, "")
+    # O checkpoint_index de run_pages é do download completo; zerar evita "download pendente"
+    # fantasma no --stats.
     meta_set(conn, "checkpoint_index", "0")
     meta_set(conn, "checkpoint_total", "0")
     conn.commit()
@@ -233,12 +329,19 @@ def build_parser():
         action="store_true",
         help="não guarda o JSON bruto de cada CVE (base bem menor, mas sem --reindex futuro)",
     )
+    parser.add_argument(
+        "--pagina", type=positive_int(2000), default=2000, metavar="N",
+        help="CVEs por requisição (padrão e máximo 2000). Com a NVD instável, páginas menores, como "
+             "500, dão menos timeout: a de 2000 chega a 16 MB",
+    )
     return parser
 
 
 def main(argv=None):
+    global PAGE_SIZE
     configure_stdio()
     args = build_parser().parse_args(argv)
+    PAGE_SIZE = args.pagina
     args.db = bases.resolve_nvd(args.db)
     resolved = db_path(args.db)
     existed = os.path.exists(resolved)

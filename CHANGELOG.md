@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.3 — 2026-10-23
+
+- `download_db.py --update` relê só as posições onde a lista da NVD mudou durante a paginação,
+  em vez da janela inteira. Cada resposta traz o total atual; a queda dele entre duas páginas
+  limita quanto um CVE pode ter escorregado para trás, e só essa faixa é relida. Numa janela de
+  29 mil CVEs, a segunda passada de 29 mil vira algumas dezenas de posições.
+- `--update` interrompido retoma de onde parou: janela, índice, fim e marcas de cada página
+  ficam em `meta.inc_*`. A queda do total durante a pausa (inclusive computador em suspensão)
+  entra na releitura como qualquer outra.
+- `--pagina N` (padrão e máximo 2000): requisições menores para quando a NVD está instável.
+- 4 testes novos (113 no total).
+
 ## 1.2.2 — 2026-10-14
 
 - `download_db.py --update` completa mesmo quando a NVD encurta a paginação. A API pagina sobre

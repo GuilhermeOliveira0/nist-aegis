@@ -200,8 +200,11 @@ python <pasta-do-plugin>/skills/cve/scripts/download_db.py --reindex
 python <pasta-do-plugin>/skills/cve/scripts/local_lookup.py --stats
 ```
 
-O download grava checkpoint a cada página: interrompido ou com erro da API, rode o mesmo comando
-de novo e ele retoma. Uma base criada pela versão 1.0.0 ganha CVSS 4.0, KEV e as faixas de
+O download e o `--update` gravam o ponto de retomada a cada página: interrompidos (rede, erro da
+API, computador em suspensão), rode o mesmo comando de novo e eles continuam dali. A NVD pagina
+sobre dados vivos; quando a lista muda durante a paginação, o `--update` relê só as posições
+afetadas. Com a NVD instável, `--pagina 500` faz requisições menores, que dão menos timeout.
+Atualizar toda semana mantém a janela pequena e rápida. Uma base criada pela versão 1.0.0 ganha CVSS 4.0, KEV e as faixas de
 versão completas com `--reindex`, sem rede. Uma base em `~/.nvd/nvd.sqlite`, de versões
 anteriores, continua sendo usada até você movê-la para `~/.nist-aegis/bases/`.
 

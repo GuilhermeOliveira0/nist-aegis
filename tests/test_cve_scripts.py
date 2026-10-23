@@ -449,23 +449,65 @@ class TestDownload(unittest.TestCase):
         self.conn.commit()
         download_db.now_utc = lambda: datetime(2026, 10, 14, 12, 0, 0, tzinfo=timezone.utc)
 
-    def test_incremental_encurtado_rele_a_janela(self):
-        """A NVD pagina sobre dados vivos: janela que encurta é relida, e o sync se completa."""
+    def test_incremental_rele_so_onde_a_lista_mudou(self):
+        """O total cai de 5 para 4 entre a 1ª e a 2ª página: só a posição 1 é relida."""
         self._base_sincronizada()
-        paginas = _Paginas([_pagina([WS, LOG4SHELL], 5), _pagina([SO_V4], 5),   # 1ª passada, curta
-                            _pagina([WS, LOG4SHELL], 3), _pagina([SO_V4], 3)])  # 2ª passada, completa
+        paginas = _Paginas([_pagina([WS, LOG4SHELL], 5), _pagina([SO_V4, WS], 4),
+                            _pagina([LOG4SHELL], 4)])
         download_db.request_json = paginas
         download_db.incremental(self.conn, None, True)
-        self.assertEqual(len(paginas.chamadas), 4)
-        self.assertEqual(paginas.chamadas[2]["startIndex"], 0)
+        self.assertEqual(len(paginas.chamadas), 3)
+        self.assertEqual((paginas.chamadas[2]["startIndex"], paginas.chamadas[2]["resultsPerPage"]), (1, 1))
+        self.assertEqual(nvd_common.meta_get(self.conn, "last_sync"), "2026-10-14T12:00:00.000Z")
+        self.assertEqual(nvd_common.meta_get(self.conn, "inc_fim"), "")
+
+    def test_sem_mudanca_nao_rele_nada(self):
+        self._base_sincronizada()
+        paginas = _Paginas([_pagina([WS, LOG4SHELL], 3), _pagina([SO_V4], 3)])
+        download_db.request_json = paginas
+        download_db.incremental(self.conn, None, True)
+        self.assertEqual(len(paginas.chamadas), 2)
+
+    def test_faixas_deslocadas(self):
+        # páginas de 2: o total cai 1 antes da página em 2 e mais 1 antes da página em 4
+        marcas = [[0, 10], [2, 9], [4, 8], [6, 8]]
+        self.assertEqual(download_db.faixas_deslocadas(marcas, 8), [[0, 2], [3, 4]])
+        self.assertEqual(download_db.faixas_deslocadas([[0, 5], [2, 5]], 5), [])
+
+    def test_incremental_interrompido_retoma_do_indice(self):
+        self._base_sincronizada()
+        download_db.request_json = _Paginas([_pagina([WS, LOG4SHELL], 4),
+                                             nvd_common.NvdRequestError("HTTP 503")])
+        with self.assertRaises(nvd_common.NvdRequestError):
+            download_db.incremental(self.conn, None, True)
+        self.assertEqual(nvd_common.meta_get(self.conn, "inc_indice"), "2")
+        # retomada no dia seguinte: mesma janela, mesmo fim, a partir do índice 2
+        download_db.now_utc = lambda: datetime(2026, 10, 15, 9, 0, 0, tzinfo=timezone.utc)
+        paginas = _Paginas([_pagina([SO_V4, WS], 4)])
+        download_db.request_json = paginas
+        download_db.incremental(self.conn, None, True)
+        self.assertEqual(paginas.chamadas[0]["startIndex"], 2)
+        self.assertEqual(paginas.chamadas[0]["lastModEndDate"], "2026-10-14T12:00:00.000Z")
         self.assertEqual(nvd_common.meta_get(self.conn, "last_sync"), "2026-10-14T12:00:00.000Z")
 
-    def test_incremental_aceita_depois_das_passadas(self):
+    def test_pausa_que_muda_a_lista_e_coberta_na_retomada(self):
         self._base_sincronizada()
-        curta = [_pagina([WS, LOG4SHELL], 5), _pagina([SO_V4], 5)]
-        download_db.request_json = _Paginas(curta * download_db.PASSADAS_INCREMENTAL)
+        download_db.request_json = _Paginas([_pagina([WS, LOG4SHELL], 6),
+                                             nvd_common.NvdRequestError("HTTP 503")])
+        with self.assertRaises(nvd_common.NvdRequestError):
+            download_db.incremental(self.conn, None, True)
+        # durante a pausa 2 CVEs saíram da janela (6 -> 4): as posições 0 e 1 são relidas
+        paginas = _Paginas([_pagina([SO_V4, WS], 4), _pagina([LOG4SHELL, WS], 4)])
+        download_db.request_json = paginas
         download_db.incremental(self.conn, None, True)
-        self.assertEqual(nvd_common.meta_get(self.conn, "last_sync"), "2026-10-14T12:00:00.000Z")
+        self.assertEqual((paginas.chamadas[1]["startIndex"], paginas.chamadas[1]["resultsPerPage"]), (0, 2))
+
+    def test_pagina_curta_de_verdade_no_incremental_e_erro(self):
+        self._base_sincronizada()
+        download_db.request_json = _Paginas([_pagina([WS, LOG4SHELL], 5), _pagina([SO_V4], 5)])
+        with self.assertRaises(nvd_common.NvdRequestError):
+            download_db.incremental(self.conn, None, True)
+        self.assertEqual(nvd_common.meta_get(self.conn, "last_sync"), "2026-10-01T00:00:00.000Z")
 
     def test_erro_de_rede_no_incremental_nao_avanca_o_sync(self):
         self._base_sincronizada()

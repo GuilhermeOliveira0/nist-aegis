@@ -108,10 +108,13 @@ Sincronização incremental, a partir do último sync registrado:
 python "${CLAUDE_SKILL_DIR}/scripts/download_db.py" --update
 ```
 
-O download é paginado de 2000 em 2000 e grava `meta.checkpoint_index` a cada página. Se o
-comando for cortado por timeout, a rede cair ou a API devolver erro, **rode o mesmo comando de
-novo**: ele retoma do checkpoint. A base só é marcada como completa quando a paginação chega ao
-total informado pela NVD. `--skip-raw` descarta o JSON bruto de cada CVE e reduz muito o tamanho
+O download é paginado de 2000 em 2000 (`--pagina N` diminui; com a NVD instável, 500 dá menos
+timeout) e grava o ponto de retomada a cada página — `meta.checkpoint_index` no completo,
+`meta.inc_*` no `--update`. Se o comando for cortado por timeout, a rede cair, a API devolver
+erro ou o computador suspender, **rode o mesmo comando de novo**: ele retoma de onde parou. A base
+só é marcada como completa quando a paginação chega ao total informado pela NVD. No `--update`,
+quando a lista muda durante a paginação (CVE alterado sai da janela), só as posições afetadas são
+relidas. `--skip-raw` descarta o JSON bruto de cada CVE e reduz muito o tamanho
 do arquivo, mas impede o `--reindex` futuro.
 
 Base criada por uma versão anterior destes scripts (o `--stats` mostra "dados: versão 1")
